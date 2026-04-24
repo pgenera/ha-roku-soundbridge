@@ -24,97 +24,51 @@ async def test_integration_connect_and_state():
         # Ensure it's ON and has a known volume
         await client.turn_on()
         await client.set_volume(75)
-        await asyncio.sleep(0.5)
         
-        # The device might reset connection on wake, wait for it to be connected and mac to be populated
-        for _ in range(150):
-            if client.is_connected and client.mac_address:
+        # Wait for MAC to be populated
+        for _ in range(50):
+            if client.mac_address:
                 break
             await asyncio.sleep(0.1)
             
         assert client.mac_address is not None
         
-        # Test play with a URL to ensure it stays in play state
+        # Test play with a URL
         await client.play_url("http://example.com/test.mp3")
-        # Wait for the device to process the URL and start playing
-        for _ in range(50):
-            if client.state == "play":
-                break
-            await asyncio.sleep(0.1)
+        # Wait a bit for it to actually transition to play internally
+        await asyncio.sleep(1.0)
         print(f"State after play_url: {client.state}")
         
         await client.pause()
-        for _ in range(20):
-            if client.state == "pause":
-                break
-            await asyncio.sleep(0.1)
-        
         await client.stop()
-        for _ in range(20):
-            if client.state == "stop":
-                break
-            await asyncio.sleep(0.1)
         assert client.state == "stop"
         
         await client.set_volume(75)
-        await asyncio.sleep(0.2)
-        for _ in range(50):
-            if client.volume == 75:
-                break
-            await asyncio.sleep(0.1)
         assert client.volume == 75
         
         # Test mute
         await client.set_mute(True)
-        await asyncio.sleep(0.2)
-        for _ in range(50):
-            if client.mute is True and client.volume == 0:
-                break
-            await asyncio.sleep(0.1)
         assert client.mute is True
-        # We'll log volume instead of strict assert if mock is racey
-        print(f"Volume during mute: {client.volume}")
+        assert client.volume == 0
         
         await client.set_mute(False)
-        await asyncio.sleep(0.2)
-        for _ in range(100):
-            if client.mute is False:
-                break
-            await asyncio.sleep(0.1)
         assert client.mute is False
         print(f"Volume after unmute: {client.volume}")
         
         await client.set_shuffle(True)
-        for _ in range(50):
-            if client.shuffle is True:
-                break
-            await asyncio.sleep(0.1)
         print(f"Shuffle state: {client.shuffle}")
         
         await client.set_repeat("all")
-        for _ in range(50):
-            if client.repeat == "all":
-                break
-            await asyncio.sleep(0.1)
         print(f"Repeat state: {client.repeat}")
         
-        # Test arbitrary IR command via send_ir_command
+        # Test arbitrary IR command
         await client.send_ir_command("CK_UP")
-        await asyncio.sleep(0.2)
         
         # Test power commands
         await client.turn_off()
-        for _ in range(50):
-            if client.power_state == "standby":
-                break
-            await asyncio.sleep(0.1)
         assert client.power_state == "standby"
         
         await client.turn_on()
-        for _ in range(50):
-            if client.power_state == "on":
-                break
-            await asyncio.sleep(0.1)
         assert client.power_state == "on"
 
     finally:

@@ -45,6 +45,7 @@ class RcpClient:
         self._list_future: asyncio.Future[list[str]] | None = None
         self._current_list: list[str] = []
         self.version: str | None = None
+        self._pending_responses: dict[str, list[asyncio.Future[str]]] = {}
 
     @property
     def is_connected(self) -> bool:
@@ -101,6 +102,13 @@ class RcpClient:
         
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Clear pending responses
+        for futures in self._pending_responses.values():
+            for fut in futures:
+                if not fut.done():
+                    fut.cancel()
+        self._pending_responses.clear()
 
         if self._writer:
             self._writer.close()
@@ -110,42 +118,54 @@ class RcpClient:
                 pass
         self._connected = False
 
-    async def _send_command(self, command: str) -> None:
+    async def _send_command(self, command: str, wait_for_response: bool = False) -> str | None:
         """Send a command to the SoundBridge."""
-        if not self._writer:
-            return
+        if not self._writer or not command.strip():
+            return None
+        
+        # Base command name for response matching (e.g., 'SetVolume' from 'SetVolume 50')
+        command_name = command.split()[0].lower()
+        
+        future = None
+        if wait_for_response:
+            future = asyncio.Future()
+            self._pending_responses.setdefault(command_name, []).append(future)
+
         try:
             _LOGGER.debug("RCP Sending: %s", command)
             self._writer.write(f"{command}\r\n".encode())
             await self._writer.drain()
+            
+            if future:
+                return await asyncio.wait_for(future, timeout=2.0)
         except Exception as err:  # pylint: disable=broad-except
             _LOGGER.debug("Failed to send command '%s': %s", command, err)
+            if future and command_name in self._pending_responses:
+                try:
+                    self._pending_responses[command_name].remove(future)
+                except ValueError:
+                    pass
             await self._handle_disconnect()
+        
+        return None
 
     async def _poll_loop(self) -> None:
         """Periodically poll for state."""
         try:
             while self._connected:
-                await self._send_command("GetPowerState")
-                await asyncio.sleep(0.1)
-                await self._send_command("GetMACAddress")
-                await asyncio.sleep(0.1)
-                await self._send_command("GetTransportState")
-                await asyncio.sleep(0.1)
-                await self._send_command("GetVolume")
-                await asyncio.sleep(0.1)
-                await self._send_command("GetCurrentSongInfo")
-                await asyncio.sleep(0.1)
-                await self._send_command("GetElapsedTime")
-                await asyncio.sleep(0.1)
-                await self._send_command("GetTotalTime")
-                await asyncio.sleep(0.1)
-                await self._send_command("Shuffle")
-                await asyncio.sleep(0.1)
-                await self._send_command("Repeat")
-                await asyncio.sleep(0.1)
-                await self._send_command("GetDisplayData")
-                await asyncio.sleep(10)
+                await self._send_command("GetPowerState", wait_for_response=True)
+                await self._send_command("GetMACAddress", wait_for_response=True)
+                await self._send_command("GetTransportState", wait_for_response=True)
+                await self._send_command("GetVolume", wait_for_response=True)
+                await self._send_command("GetCurrentSongInfo", wait_for_response=True)
+                await self._send_command("GetElapsedTime", wait_for_response=True)
+                await self._send_command("GetTotalTime", wait_for_response=True)
+                await self._send_command("Shuffle", wait_for_response=True)
+                await self._send_command("Repeat", wait_for_response=True)
+                await self._send_command("GetDisplayData", wait_for_response=True)
+                
+                # Small wait between full poll cycles
+                await asyncio.sleep(5)
 
         except asyncio.CancelledError:
             pass
@@ -197,6 +217,20 @@ class RcpClient:
         parts = line.split(":", 1)
         command_key = parts[0].strip().lower()
         value = parts[1].strip()
+
+        # Resolve pending command futures
+        if command_key in self._pending_responses:
+            # Special case: for GetCurrentSongInfo, we only resolve on 'OK'
+            # to ensure we've read all metadata lines.
+            should_resolve = True
+            if command_key == "getcurrentsonginfo" and value.lower() != "ok":
+                should_resolve = False
+            
+            if should_resolve:
+                futures = self._pending_responses.pop(command_key)
+                for fut in futures:
+                    if not fut.done():
+                        fut.set_result(value)
 
         if command_key == "getpowerstate":
             self.power_state = value.lower()
@@ -304,29 +338,39 @@ class RcpClient:
 
     # Media player commands
     async def play(self) -> None:
-        await self._send_command("Play")
+        await self._send_command("Play", wait_for_response=True)
+        self.state = "play"
+        self.update_callback()
 
     async def pause(self) -> None:
-        await self._send_command("Pause")
+        await self._send_command("Pause", wait_for_response=True)
+        self.state = "pause"
+        self.update_callback()
 
     async def stop(self) -> None:
-        await self._send_command("Stop")
+        await self._send_command("Stop", wait_for_response=True)
+        self.state = "stop"
+        self.update_callback()
 
     async def next(self) -> None:
-        await self._send_command("Next")
+        await self._send_command("Next", wait_for_response=True)
 
     async def previous(self) -> None:
-        await self._send_command("Previous")
+        await self._send_command("Previous", wait_for_response=True)
 
     async def play_url(self, url: str) -> None:
-        await self._send_command(f"PlayStation {url}")
+        await self._send_command(f"PlayStation {url}", wait_for_response=True)
+        self.state = "play"
+        self.update_callback()
 
     async def seek(self, position: int) -> None:
-        # Seek doesn't seem directly supported in simple way, ignoring for now or using SetElapsedTime if available
+        # Seek doesn't seem directly supported in simple way
         pass
 
     async def set_volume(self, volume: int) -> None:
-        await self._send_command(f"SetVolume {volume}")
+        await self._send_command(f"SetVolume {volume}", wait_for_response=True)
+        self.volume = volume
+        self.update_callback()
 
     async def set_mute(self, mute: bool) -> None:
         """Simulate mute by setting volume to 0 or restoring it."""
@@ -341,33 +385,35 @@ class RcpClient:
 
     async def play_preset(self, index: int) -> None:
         """Play a user preset."""
-        await self._send_command(f"PlayPreset {index}")
+        await self._send_command(f"PlayPreset {index}", wait_for_response=True)
 
     async def turn_on(self) -> None:
         """Turn on the SoundBridge."""
-        # Some versions might support SetPowerState on, but 
-        # based on testing, PlayPreset 0 is a reliable way to wake it up.
-        await self._send_command("PlayPreset 0")
+        await self._send_command("PlayPreset 0", wait_for_response=True)
         self.power_state = "on"
 
     async def turn_off(self) -> None:
         """Turn off the SoundBridge."""
-        await self._send_command("SetPowerState standby")
+        await self._send_command("SetPowerState standby", wait_for_response=True)
         self.power_state = "standby"
 
     async def set_shuffle(self, shuffle: bool) -> None:
         """Set shuffle mode."""
         mode = "on" if shuffle else "off"
-        await self._send_command(f"Shuffle {mode}")
+        await self._send_command(f"Shuffle {mode}", wait_for_response=True)
+        self.shuffle = shuffle
+        self.update_callback()
 
     async def set_repeat(self, repeat_mode: str) -> None:
         """Set repeat mode."""
         # Valid: one, all, none
-        await self._send_command(f"Repeat {repeat_mode}")
+        await self._send_command(f"Repeat {repeat_mode}", wait_for_response=True)
+        self.repeat = repeat_mode
+        self.update_callback()
 
     async def send_ir_command(self, command: str) -> None:
         """Send an arbitrary IR command."""
-        await self._send_command(f"IrDispatchCommand {command}")
+        await self._send_command(f"IrDispatchCommand {command}", wait_for_response=True)
 
     async def _get_list(self, command: str) -> list[str]:
         """Execute a command that returns a list and wait for results."""
