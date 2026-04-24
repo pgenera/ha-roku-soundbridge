@@ -64,7 +64,24 @@ async def test_media_player_state(hass: HomeAssistant, mock_client) -> None:
     mock_client.update_callback()
     await hass.async_block_till_done()
     state = hass.states.get("media_player.roku_soundbridge")
-    assert state.state == MediaPlayerState.STANDBY
+    assert state.state == MediaPlayerState.OFF
+    # Test other transport states
+    mock_client.power_state = "on"
+    states_to_test = [("pause", MediaPlayerState.PAUSED), ("stop", MediaPlayerState.IDLE), ("unknown", MediaPlayerState.ON)]
+    for rcp_state, ha_state in states_to_test:
+        mock_client.state = rcp_state
+        mock_client.update_callback()
+        await hass.async_block_till_done()
+        state = hass.states.get("media_player.roku_soundbridge")
+        assert state.state == ha_state
+
+    # Test unavailable
+    mock_client.is_connected = False
+    mock_client.update_callback()
+    await hass.async_block_till_done()
+    state = hass.states.get("media_player.roku_soundbridge")
+    assert state.state == "unavailable"
+    mock_client.is_connected = True
 
 async def test_media_player_commands(hass: HomeAssistant, mock_client) -> None:
     """Test media player commands."""
@@ -148,6 +165,21 @@ async def test_media_player_commands(hass: HomeAssistant, mock_client) -> None:
     mock_client.turn_off.assert_called_once()
 
     await hass.services.async_call(
+        "media_player", "toggle", {"entity_id": "media_player.mock_title"}, blocking=True
+    )
+    # Since it was "on" (even if turn_off was called, mock client state didn't change unless we did it)
+    # Actually mock_client.turn_off didn't change mock_client.power_state
+    # Let's set it to standby to test toggle-to-on
+    mock_client.power_state = "standby"
+    mock_client.update_callback()
+    await hass.async_block_till_done()
+    
+    await hass.services.async_call(
+        "media_player", "toggle", {"entity_id": "media_player.mock_title"}, blocking=True
+    )
+    mock_client.turn_on.assert_called()
+
+    await hass.services.async_call(
         "media_player", "shuffle_set", {"entity_id": "media_player.mock_title", "shuffle": True}, blocking=True
     )
     mock_client.set_shuffle.assert_called_with(True)
@@ -167,3 +199,10 @@ async def test_media_player_commands(hass: HomeAssistant, mock_client) -> None:
         DOMAIN, "send_command", {"entity_id": "media_player.mock_title", "command": "CK_UP"}, blocking=True
     )
     mock_client.send_ir_command.assert_called_with("CK_UP")
+
+async def test_legacy_setup(hass: HomeAssistant) -> None:
+    """Test legacy platform setup."""
+    from custom_components.roku_soundbridge.media_player import async_setup_platform
+    async_add_entities = MagicMock()
+    with patch("custom_components.roku_soundbridge.protocol.RcpClient.connect", return_value=False):
+        await async_setup_platform(hass, {CONF_HOST: "127.0.0.1"}, async_add_entities)

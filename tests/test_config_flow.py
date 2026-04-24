@@ -55,3 +55,24 @@ async def test_user_form_cannot_connect(hass: HomeAssistant, mock_client) -> Non
 
     assert result2["type"] is FlowResultType.FORM
     assert result2["errors"] == {"base": "cannot_connect"}
+
+async def test_user_form_unknown_error(hass: HomeAssistant, mock_client) -> None:
+    """Test handling unknown errors in the user form."""
+    result = await hass.config_entries.flow.async_init(
+        DOMAIN, context={"source": config_entries.SOURCE_USER}
+    )
+
+    with patch(
+        "custom_components.roku_soundbridge.config_flow.validate_input",
+        side_effect=Exception("Unknown error"),
+    ):
+        result2 = await hass.config_entries.flow.async_configure(
+            result["flow_id"],
+            {
+                "host": "127.0.0.1",
+                "port": 4444,
+            },
+        )
+
+    assert result2["type"] is FlowResultType.FORM
+    assert result2["errors"] == {"base": "unknown"}

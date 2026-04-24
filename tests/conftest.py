@@ -28,7 +28,7 @@ def mock_client():
         instance.connect.return_value = True
         instance.mac_address = "00:11:22:33:44:55"
         instance.is_connected = True
-        instance.state = "stopped"
+        instance.state = "stop"
         instance.title = None
         instance.artist = None
         instance.album = None

@@ -46,6 +46,7 @@ class RcpClient:
         self._current_list: list[str] = []
         self.version: str | None = None
         self._pending_responses: dict[str, list[asyncio.Future[str]]] = {}
+        self._send_lock = asyncio.Lock()
 
     @property
     def is_connected(self) -> bool:
@@ -126,26 +127,27 @@ class RcpClient:
         # Base command name for response matching (e.g., 'SetVolume' from 'SetVolume 50')
         command_name = command.split()[0].lower()
         
-        future = None
-        if wait_for_response:
-            future = asyncio.Future()
-            self._pending_responses.setdefault(command_name, []).append(future)
+        async with self._send_lock:
+            future = None
+            if wait_for_response:
+                future = asyncio.Future()
+                self._pending_responses.setdefault(command_name, []).append(future)
 
-        try:
-            _LOGGER.debug("RCP Sending: %s", command)
-            self._writer.write(f"{command}\r\n".encode())
-            await self._writer.drain()
-            
-            if future:
-                return await asyncio.wait_for(future, timeout=2.0)
-        except Exception as err:  # pylint: disable=broad-except
-            _LOGGER.debug("Failed to send command '%s': %s", command, err)
-            if future and command_name in self._pending_responses:
-                try:
-                    self._pending_responses[command_name].remove(future)
-                except ValueError:
-                    pass
-            await self._handle_disconnect()
+            try:
+                _LOGGER.debug("RCP Sending: %s", command)
+                self._writer.write(f"{command}\r\n".encode())
+                await self._writer.drain()
+                
+                if future:
+                    return await asyncio.wait_for(future, timeout=5.0)
+            except Exception as err:  # pylint: disable=broad-except
+                _LOGGER.debug("Failed to send command '%s': %s", command, err)
+                if future and command_name in self._pending_responses:
+                    try:
+                        self._pending_responses[command_name].remove(future)
+                    except ValueError:
+                        pass
+                await self._handle_disconnect()
         
         return None
 
@@ -227,8 +229,11 @@ class RcpClient:
                 should_resolve = False
             
             if should_resolve:
-                futures = self._pending_responses.pop(command_key)
-                for fut in futures:
+                futures = self._pending_responses.get(command_key)
+                if futures:
+                    fut = futures.pop(0)
+                    if not futures:
+                        self._pending_responses.pop(command_key)
                     if not fut.done():
                         fut.set_result(value)
 

@@ -128,7 +128,7 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
             return MediaPlayerState.OFF
         
         if self._client.power_state == "standby":
-            return MediaPlayerState.STANDBY
+            return MediaPlayerState.OFF
 
         state = self._client.state
         if state == "play":
@@ -139,7 +139,7 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
             return MediaPlayerState.BUFFERING
         if state == "stop":
             return MediaPlayerState.IDLE
-        return MediaPlayerState.IDLE
+        return MediaPlayerState.ON
 
     @property
     def supported_features(self) -> MediaPlayerEntityFeature:
