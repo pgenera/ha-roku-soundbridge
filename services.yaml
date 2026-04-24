@@ -1,0 +1,11 @@
+send_command:
+  name: Send command
+  description: Send an arbitrary RCP or IR command to the Roku SoundBridge.
+  fields:
+    command:
+      name: Command
+      description: The command to send (e.g., CK_UP, GetPowerState, etc.).
+      example: CK_UP
+      required: true
+      selector:
+        text:

@@ -4,13 +4,19 @@ from __future__ import annotations
 
 from typing import Any
 
+import voluptuous as vol
+
 from homeassistant.components.media_player import (
+    BrowseMedia,
+    MediaClass,
     MediaPlayerEntity,
     MediaPlayerEntityFeature,
     MediaPlayerState,
     MediaType,
+    RepeatMode,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv, entity_platform
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
 
@@ -27,7 +33,21 @@ SUPPORT_ROKU_SOUNDBRIDGE = (
     | MediaPlayerEntityFeature.VOLUME_SET
     | MediaPlayerEntityFeature.VOLUME_STEP
     | MediaPlayerEntityFeature.PLAY_MEDIA
+    | MediaPlayerEntityFeature.TURN_ON
+    | MediaPlayerEntityFeature.TURN_OFF
+    | MediaPlayerEntityFeature.SHUFFLE_SET
+    | MediaPlayerEntityFeature.REPEAT_SET
+    | MediaPlayerEntityFeature.VOLUME_MUTE
+    | MediaPlayerEntityFeature.BROWSE_MEDIA
 )
+
+REPEAT_MODE_MAP = {
+    "none": RepeatMode.OFF,
+    "all": RepeatMode.ALL,
+    "one": RepeatMode.ONE,
+}
+
+REPEAT_MODE_MAP_REV = {v: k for k, v in REPEAT_MODE_MAP.items()}
 
 
 async def async_setup_platform(
@@ -58,6 +78,15 @@ async def async_setup_entry(
     """Set up the Roku SoundBridge media player platform."""
     client = entry.runtime_data
     async_add_entities([RokuSoundBridgeMediaPlayer(client, entry.title, entry.entry_id, entry.unique_id)])
+
+    platform = entity_platform.async_get_current_platform()
+    platform.async_register_entity_service(
+        "send_command",
+        {
+            vol.Required("command"): cv.string,
+        },
+        "async_send_command",
+    )
 
 
 class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
@@ -98,6 +127,9 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
         if not self.available:
             return MediaPlayerState.OFF
         
+        if self._client.power_state == "standby":
+            return MediaPlayerState.STANDBY
+
         state = self._client.state
         if state == "play":
             return MediaPlayerState.PLAYING
@@ -120,9 +152,14 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
         return self._client.volume / 100.0
 
     @property
-    def is_volume_muted(self) -> bool | None:
+    def is_volume_muted(self) -> bool:
         """Boolean if volume is currently muted."""
         return self._client.mute
+
+    @property
+    def media_content_id(self) -> str | None:
+        """Content ID of current playing media."""
+        return self._client.url
 
     @property
     def media_title(self) -> str | None:
@@ -173,6 +210,27 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
         """Send play command."""
         await self._client.play()
 
+    @property
+    def shuffle(self) -> bool:
+        """Boolean if shuffle is enabled."""
+        return self._client.shuffle
+
+    @property
+    def repeat(self) -> RepeatMode:
+        """Return current repeat mode."""
+        return REPEAT_MODE_MAP.get(self._client.repeat, RepeatMode.OFF)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        """Return extra state attributes."""
+        return {
+            "display_line1": self._client.display_lines[0],
+            "display_line2": self._client.display_lines[1],
+            "mac_address": self._client.mac_address,
+            "version": self._client.version,
+            **self._client.metadata,
+        }
+
     async def async_media_pause(self) -> None:
         """Send pause command."""
         await self._client.pause()
@@ -193,4 +251,106 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
         self, media_type: MediaType | str, media_id: str, **kwargs: Any
     ) -> None:
         """Play media."""
-        await self._client.play_url(media_id)
+        if media_id.startswith("play_preset:"):
+            preset_index = int(media_id.split(":")[1])
+            await self._client.play_preset(preset_index)
+        else:
+            await self._client.play_url(media_id)
+
+    async def async_turn_on(self) -> None:
+        """Turn on the media player."""
+        await self._client.turn_on()
+
+    async def async_turn_off(self) -> None:
+        """Turn off the media player."""
+        await self._client.turn_off()
+
+    async def async_toggle(self) -> None:
+        """Toggle the power state."""
+        if self.state == MediaPlayerState.STANDBY:
+            await self.async_turn_on()
+        else:
+            await self.async_turn_off()
+
+    async def async_set_shuffle(self, shuffle: bool) -> None:
+        """Enable/disable shuffle mode."""
+        await self._client.set_shuffle(shuffle)
+
+    async def async_set_repeat(self, repeat: RepeatMode) -> None:
+        """Set repeat mode."""
+        mode = REPEAT_MODE_MAP_REV.get(repeat, "none")
+        await self._client.set_repeat(mode)
+
+    async def async_mute_volume(self, mute: bool) -> None:
+        """Mute the volume."""
+        await self._client.set_mute(mute)
+
+    async def async_send_command(self, command: str) -> None:
+        """Send an arbitrary RCP command."""
+        await self._client.send_ir_command(command)
+
+    async def async_browse_media(
+        self,
+        media_content_type: str | None = None,
+        media_content_id: str | None = None,
+    ) -> BrowseMedia:
+        """Implement the browsing of media."""
+        if media_content_id is None:
+            return await self._async_browse_root()
+        
+        if media_content_id.startswith("presets"):
+            return await self._async_browse_presets()
+            
+        raise ValueError(f"Unknown media_content_id: {media_content_id}")
+
+    async def _async_browse_root(self) -> BrowseMedia:
+        """Browse the root."""
+        children = []
+        
+        children.append(
+            BrowseMedia(
+                title="Presets",
+                media_class=MediaClass.DIRECTORY,
+                media_content_id="presets",
+                media_content_type=MediaType.PLAYLIST,
+                can_play=False,
+                can_expand=True,
+            )
+        )
+        
+        return BrowseMedia(
+            title="Roku SoundBridge",
+            media_class=MediaClass.DIRECTORY,
+            media_content_id="root",
+            media_content_type=MediaType.PLAYLIST,
+            can_play=False,
+            can_expand=True,
+            children=children,
+        )
+
+    async def _async_browse_presets(self) -> BrowseMedia:
+        """Browse presets."""
+        presets = await self._client.list_presets()
+        children = []
+        
+        for i, title in enumerate(presets):
+            children.append(
+                BrowseMedia(
+                    title=title or f"Preset {i+1}",
+                    media_class=MediaClass.MUSIC,
+                    media_content_id=f"play_preset:{i}",
+                    media_content_type=MediaType.MUSIC,
+                    can_play=True,
+                    can_expand=False,
+                )
+            )
+            
+        return BrowseMedia(
+            title="Presets",
+            media_class=MediaClass.DIRECTORY,
+            media_content_id="presets",
+            media_content_type=MediaType.PLAYLIST,
+            can_play=False,
+            can_expand=True,
+            children=children,
+        )

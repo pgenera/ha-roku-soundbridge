@@ -38,4 +38,10 @@ def mock_client():
         instance.position = 0
         instance.position_updated_at = None
         instance.url = None
+        instance.power_state = "on"
+        instance.shuffle = False
+        instance.repeat = "off"
+        instance.display_lines = ["", ""]
+        instance.metadata = {}
+        instance.version = "3.0.44"
         yield instance
