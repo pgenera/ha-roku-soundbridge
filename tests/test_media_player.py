@@ -137,6 +137,7 @@ async def test_media_player_commands(hass: HomeAssistant, mock_client) -> None:
 
     # Test browsing
     mock_client.list_presets.return_value = ["Preset 1", "Preset 2"]
+    mock_client.list_servers.return_value = ["Internet Radio", "Local Server"]
     
     # We can use the browse_media service to test browsing
     # or get the entity from the component
@@ -145,14 +146,33 @@ async def test_media_player_commands(hass: HomeAssistant, mock_client) -> None:
     
     browse = await entity.async_browse_media()
     assert browse.title == "Roku SoundBridge"
-    assert len(browse.children) == 1
+    assert len(browse.children) == 2
     assert browse.children[0].title == "Presets"
+    assert browse.children[1].title == "Servers"
 
     browse_presets = await entity.async_browse_media("presets", "presets")
     assert browse_presets.title == "Presets"
     assert len(browse_presets.children) == 2
     assert browse_presets.children[0].title == "Preset 1"
     assert browse_presets.children[0].media_content_id == "play_preset:0"
+
+    browse_servers = await entity.async_browse_media("servers", "servers")
+    assert browse_servers.title == "Servers"
+    assert len(browse_servers.children) == 2
+    assert browse_servers.children[0].title == "Internet Radio"
+    assert browse_servers.children[0].media_content_id == "connect_server:0"
+
+    await hass.services.async_call(
+        "media_player",
+        "play_media",
+        {
+            "entity_id": "media_player.mock_title",
+            "media_content_id": "connect_server:0",
+            "media_content_type": "music",
+        },
+        blocking=True,
+    )
+    mock_client.connect_server.assert_called_with(0)
 
     await hass.services.async_call(
         "media_player", "turn_on", {"entity_id": "media_player.mock_title"}, blocking=True

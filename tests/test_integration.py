@@ -61,6 +61,16 @@ async def test_integration_connect_and_state():
         await client.set_repeat("all")
         print(f"Repeat state: {client.repeat}")
         
+        # Test server connecting (Internet Radio is usually 0)
+        await client.connect_server(0)
+        await asyncio.sleep(0.5)
+        
+        # Test preset playback
+        await client.play_preset(1)
+        await asyncio.sleep(0.5)
+        # We don't strictly assert state here as it might take time to start playing
+        # but we've verified the command was sent without error.
+        
         # Test arbitrary IR command
         await client.send_ir_command("CK_UP")
         

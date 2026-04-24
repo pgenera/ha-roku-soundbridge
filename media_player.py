@@ -254,6 +254,9 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
         if media_id.startswith("play_preset:"):
             preset_index = int(media_id.split(":")[1])
             await self._client.play_preset(preset_index)
+        elif media_id.startswith("connect_server:"):
+            server_index = int(media_id.split(":")[1])
+            await self._client.connect_server(server_index)
         else:
             await self._client.play_url(media_id)
 
@@ -301,6 +304,9 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
         if media_content_id.startswith("presets"):
             return await self._async_browse_presets()
             
+        if media_content_id.startswith("servers"):
+            return await self._async_browse_servers()
+
         raise ValueError(f"Unknown media_content_id: {media_content_id}")
 
     async def _async_browse_root(self) -> BrowseMedia:
@@ -317,11 +323,49 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
                 can_expand=True,
             )
         )
+
+        children.append(
+            BrowseMedia(
+                title="Servers",
+                media_class=MediaClass.DIRECTORY,
+                media_content_id="servers",
+                media_content_type=MediaType.PLAYLIST,
+                can_play=False,
+                can_expand=True,
+            )
+        )
         
         return BrowseMedia(
             title="Roku SoundBridge",
             media_class=MediaClass.DIRECTORY,
             media_content_id="root",
+            media_content_type=MediaType.PLAYLIST,
+            can_play=False,
+            can_expand=True,
+            children=children,
+        )
+
+    async def _async_browse_servers(self) -> BrowseMedia:
+        """Browse servers."""
+        servers = await self._client.list_servers()
+        children = []
+        
+        for i, title in enumerate(servers):
+            children.append(
+                BrowseMedia(
+                    title=title or f"Server {i}",
+                    media_class=MediaClass.DIRECTORY,
+                    media_content_id=f"connect_server:{i}",
+                    media_content_type=MediaType.PLAYLIST,
+                    can_play=True,
+                    can_expand=False,
+                )
+            )
+            
+        return BrowseMedia(
+            title="Servers",
+            media_class=MediaClass.DIRECTORY,
+            media_content_id="servers",
             media_content_type=MediaType.PLAYLIST,
             can_play=False,
             can_expand=True,
