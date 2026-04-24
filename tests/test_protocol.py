@@ -192,6 +192,7 @@ async def test_rcp_client_timeout(update_callback) -> None:
     # Verify we can still send commands (lock was released)
     # Reset mock and side effect
     client._writer.write.reset_mock()
+    client._connected = True # Reset connected state as TimeoutError calls _handle_disconnect
     
     # This should not hang
     task = asyncio.create_task(client.set_volume(70))
@@ -241,7 +242,38 @@ async def test_rcp_client_song_info_transaction(update_callback) -> None:
     assert not task.done()
     assert client.title == "Test"
     
-    # Send OK - should resolve
     client._parse_line("GetCurrentSongInfo: OK")
     await task
     assert task.done()
+
+async def test_rcp_client_offline_fail_fast(update_callback) -> None:
+    """Test that commands fail fast when disconnected."""
+    client = RcpClient("127.0.0.1", 4444, update_callback)
+    client._connected = False
+    client._writer = MagicMock()
+    
+    # Should return None immediately
+    result = await client._send_command("Test", wait_for_response=True)
+    assert result is None
+    assert not client._writer.write.called
+
+async def test_rcp_client_disconnection_during_command(update_callback) -> None:
+    """Test that disconnection during a command cancels it."""
+    client = RcpClient("127.0.0.1", 4444, update_callback)
+    client._writer = MagicMock()
+    client._connected = True
+    client._writer.drain.return_value = asyncio.Future()
+    client._writer.drain.return_value.set_result(None)
+    client._ensure_reconnect = MagicMock()
+
+    task = asyncio.create_task(client._send_command("Test", wait_for_response=True))
+    await asyncio.sleep(0.01)
+    
+    # Trigger disconnection
+    await client._handle_disconnect()
+    
+    # Task should raise/fail (or return None if we caught it)
+    # Our implementation catches Exception and returns None
+    result = await task
+    assert result is None
+    assert client.is_connected is False

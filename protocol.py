@@ -104,12 +104,7 @@ class RcpClient:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         
-        # Clear pending responses
-        for futures in self._pending_responses.values():
-            for fut in futures:
-                if not fut.done():
-                    fut.cancel()
-        self._pending_responses.clear()
+        self._clear_pending_responses()
 
         if self._writer:
             self._writer.close()
@@ -119,15 +114,29 @@ class RcpClient:
                 pass
         self._connected = False
 
+    def _clear_pending_responses(self) -> None:
+        """Cancel all pending command futures."""
+        for futures in self._pending_responses.values():
+            for fut in futures:
+                if not fut.done():
+                    fut.cancel()
+        self._pending_responses.clear()
+        
+        if self._list_future and not self._list_future.done():
+            self._list_future.cancel()
+
     async def _send_command(self, command: str, wait_for_response: bool = False) -> str | None:
         """Send a command to the SoundBridge."""
-        if not self._writer or not command.strip():
+        if not self._connected or not self._writer or not command.strip():
             return None
         
         # Base command name for response matching (e.g., 'SetVolume' from 'SetVolume 50')
         command_name = command.split()[0].lower()
         
         async with self._send_lock:
+            if not self._connected or not self._writer:
+                return None
+
             future = None
             if wait_for_response:
                 future = asyncio.Future()
@@ -140,7 +149,9 @@ class RcpClient:
                 
                 if future:
                     return await asyncio.wait_for(future, timeout=5.0)
-            except Exception as err:  # pylint: disable=broad-except
+                
+                return "SENT"
+            except (Exception, asyncio.CancelledError) as err:
                 _LOGGER.debug("Failed to send command '%s': %s", command, err)
                 if future and command_name in self._pending_responses:
                     try:
@@ -148,6 +159,8 @@ class RcpClient:
                     except ValueError:
                         pass
                 await self._handle_disconnect()
+                if isinstance(err, asyncio.CancelledError) and self._closing:
+                    raise
         
         return None
 
@@ -326,6 +339,7 @@ class RcpClient:
         
         was_connected = self._connected
         self._connected = False
+        self._clear_pending_responses()
         
         if was_connected:
             self.update_callback()
@@ -422,14 +436,21 @@ class RcpClient:
 
     async def _get_list(self, command: str) -> list[str]:
         """Execute a command that returns a list and wait for results."""
+        if not self._connected:
+            return []
+
         if self._list_future and not self._list_future.done():
             self._list_future.cancel()
         
         self._list_future = asyncio.Future()
-        await self._send_command(command)
+        if await self._send_command(command) is None:
+            if not self._list_future.done():
+                self._list_future.cancel()
+            return []
+
         try:
-            return await asyncio.wait_for(self._list_future, timeout=10)
-        except asyncio.TimeoutError:
+            return await asyncio.wait_for(self._list_future, timeout=10.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             return []
 
     async def list_servers(self) -> list[str]:
