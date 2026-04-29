@@ -1,438 +1,655 @@
-"""Protocol handler for Roku SoundBridge RCP."""
+"""Roku SoundBridge RCP protocol implementation."""
+
+from __future__ import annotations
 
 import asyncio
+from collections import deque
+import contextlib
 import logging
 import time
-from typing import Any, Callable
+from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
 
-class RcpClient:
-    """Roku Control Protocol (RCP) client."""
 
-    def __init__(self, host: str, port: int, update_callback: Callable[[], None]) -> None:
+class RcpClient:
+    """Async client for Roku SoundBridge RCP protocol."""
+
+    def __init__(self, host: str, port: int, update_callback: callable) -> None:
         """Initialize the client."""
         self.host = host
         self.port = port
         self.update_callback = update_callback
+
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
         self._connected = False
+        self._connecting = False
         self._closing = False
-        self._reconnect_task: asyncio.Task | None = None
+        self._lock = asyncio.Lock()
+        self._pending_responses: dict[str, deque[asyncio.Future]] = {}
+
         self._read_task: asyncio.Task | None = None
         self._poll_task: asyncio.Task | None = None
+        self._reconnect_task: asyncio.Task | None = None
 
-        # State
-        self.state: str = "stopped"
-        self.title: str | None = None
-        self.artist: str | None = None
-        self.album: str | None = None
-        self.genre: str | None = None
-        self.url: str | None = None
-        self.duration: int = 0
-        self.position: int = 0
-        self.position_updated_at: float | None = None
-        self.volume: int = 0
-        self.mute: bool = False
-        self.mac_address: str | None = None
-        self.power_state: str = "on"
-        self.shuffle: bool = False
-        self.repeat: str = "off"
-        self.display_lines: list[str] = ["", ""]
-        self.metadata: dict[str, Any] = {}
-        self._pre_mute_volume: int = 50
-        self._list_future: asyncio.Future[list[str]] | None = None
+        self._sketch_reader: asyncio.StreamReader | None = None
+        self._sketch_writer: asyncio.StreamWriter | None = None
+
+        # State data
+        self.power_state = "on"
+        self.state = "stop"
+        self.volume = 0
+        self.mute = False
+        self.title = ""
+        self.artist = ""
+        self.album = ""
+        self.genre = ""
+        self.url = ""
+        self.duration = 0
+        self.position = 0
+        self.position_updated_at = 0.0
+        self.shuffle = False
+        self.repeat = "off"
+        self.display_lines = ["", ""]
+        self.mac_address = ""
+        self.version = ""
+        self.metadata: dict[str, str] = {}
+        self.display_data = b""
+
+        self._list_future: asyncio.Future | None = None
         self._current_list: list[str] = []
-        self.version: str | None = None
-        self._pending_responses: dict[str, list[asyncio.Future[str]]] = {}
-        self._send_lock = asyncio.Lock()
+        self._expecting_display_data = False
 
     @property
     def is_connected(self) -> bool:
-        """Return if the client is connected."""
+        """Return True if connected."""
         return self._connected
 
     async def connect(self) -> bool:
         """Connect to the SoundBridge."""
+        if self._connected:
+            return True
+
+        if self._connecting:
+            # Wait for the other task to finish connecting
+            for _ in range(50):
+                if self._connected:
+                    return True
+                if not self._connecting:
+                    break
+                await asyncio.sleep(0.1)
+            if self._connected:
+                return True
+
+        self._connecting = True
+
         try:
+            _LOGGER.debug(
+                "Connecting to Roku SoundBridge at %s:%d", self.host, self.port
+            )
             self._reader, self._writer = await asyncio.wait_for(
-                asyncio.open_connection(self.host, self.port), timeout=5
+                asyncio.open_connection(self.host, self.port), timeout=5.0
             )
             self._connected = True
             self._closing = False
-            _LOGGER.debug("Connected to Roku SoundBridge at %s:%d", self.host, self.port)
-            
-            # Enter RCP mode
-            self._writer.write(b"rcp\r\n")
-            await self._writer.drain()
-            
+
+            # Port 5555 drops us directly into RCP. Wait for the banner.
+            # Some firmware versions or network conditions might send leading newlines.
+            line = b""
+            for _ in range(3):
+                line = await asyncio.wait_for(self._reader.readline(), timeout=5.0)
+                if line.strip():
+                    break
+
+            if not line.startswith(b"roku: ready"):
+                _LOGGER.error("Unexpected banner on port %d: %s", self.port, line)
+                raise ConnectionError(f"Invalid RCP banner: {line!r}")
+
             if not self._read_task or self._read_task.done():
                 self._read_task = asyncio.create_task(self._read_loop())
             if not self._poll_task or self._poll_task.done():
                 self._poll_task = asyncio.create_task(self._poll_loop())
-            
             return True
-        except (asyncio.TimeoutError, ConnectionRefusedError, OSError) as err:
+        except (TimeoutError, ConnectionRefusedError, OSError) as err:
             _LOGGER.debug("Failed to connect to %s:%d: %s", self.host, self.port, err)
-            self._ensure_reconnect()
+            self._handle_disconnect()
             return False
-
-    def _ensure_reconnect(self) -> None:
-        """Ensure the reconnection loop is running."""
-        if not self._closing and (not self._reconnect_task or self._reconnect_task.done()):
-            self._reconnect_task = asyncio.create_task(self._reconnect_loop())
+        finally:
+            self._connecting = False
 
     async def disconnect(self) -> None:
         """Disconnect from the SoundBridge."""
-        if self._closing:
-            return
         self._closing = True
         self._connected = False
-        
-        tasks = []
-        if self._read_task and not self._read_task.done():
+
+        if self._read_task:
             self._read_task.cancel()
-            tasks.append(self._read_task)
-        if self._poll_task and not self._poll_task.done():
+        if self._poll_task:
             self._poll_task.cancel()
-            tasks.append(self._poll_task)
-        if self._reconnect_task and not self._reconnect_task.done():
+        if self._reconnect_task:
             self._reconnect_task.cancel()
-            tasks.append(self._reconnect_task)
-        
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        
-        self._clear_pending_responses()
 
         if self._writer:
             self._writer.close()
-            try:
+            with contextlib.suppress(Exception):
                 await self._writer.wait_closed()
-            except Exception:  # pylint: disable=broad-except
-                pass
+            self._writer = None
+
+        if self._sketch_writer:
+            self._sketch_writer.close()
+            with contextlib.suppress(Exception):
+                await self._sketch_writer.wait_closed()
+            self._sketch_writer = None
+            self._sketch_reader = None
+
+    def _handle_disconnect(self) -> None:
+        """Handle a disconnection (non-blocking)."""
+        if self._closing:
+            return
+
+        was_connected = self._connected
         self._connected = False
+        self._clear_pending_responses()
+
+        # Perform cleanup in a separate task so we don't block or get cancelled
+        # if the current task (read/poll loop) is about to be cancelled.
+        asyncio.create_task(self._cleanup_connection(was_connected))
+        self._ensure_reconnect()
+
+    async def _cleanup_connection(self, was_connected: bool) -> None:
+        """Clean up tasks and connection."""
+        current_task = asyncio.current_task()
+
+        if self._read_task and not self._read_task.done() and self._read_task != current_task:
+            self._read_task.cancel()
+        if self._poll_task and not self._poll_task.done() and self._poll_task != current_task:
+            self._poll_task.cancel()
+
+        if self._writer:
+            self._writer.close()
+            with contextlib.suppress(Exception):
+                await self._writer.wait_closed()
+            self._writer = None
+
+        # Also close sketch connection if it exists
+        if self._sketch_writer:
+            self._sketch_writer.close()
+            with contextlib.suppress(Exception):
+                await self._sketch_writer.wait_closed()
+            self._sketch_writer = None
+            self._sketch_reader = None
+
+        if was_connected:
+            _LOGGER.info("Disconnected from %s:%d", self.host, self.port)
+            self.update_callback()
+
+    def _ensure_reconnect(self) -> None:
+        """Ensure a reconnect is scheduled."""
+        if self._closing or (self._reconnect_task and not self._reconnect_task.done()):
+            return
+
+        _LOGGER.debug("Starting reconnection loop")
+        self._reconnect_task = asyncio.create_task(self._reconnect_loop())
+
+    async def _reconnect_loop(self) -> None:
+        """Reconnect loop."""
+        delay = 5
+        _LOGGER.debug("Reconnection loop started")
+        while not self._connected and not self._closing:
+            _LOGGER.debug("Reconnection attempt in %ds...", delay)
+            await asyncio.sleep(delay)
+            if await self.connect():
+                _LOGGER.info("Reconnected to %s:%d", self.host, self.port)
+                self.update_callback()
+                break
+            delay = min(delay * 2, 60)
+        _LOGGER.debug("Reconnection loop finished")
 
     def _clear_pending_responses(self) -> None:
-        """Cancel all pending command futures."""
-        for futures in self._pending_responses.values():
-            for fut in futures:
-                if not fut.done():
-                    fut.cancel()
+        """Clear all pending responses."""
+        for deq in self._pending_responses.values():
+            while deq:
+                future = deq.popleft()
+                if not future.done():
+                    future.set_result(None)
         self._pending_responses.clear()
-        
-        if self._list_future and not self._list_future.done():
-            self._list_future.cancel()
 
-    async def _send_command(self, command: str, wait_for_response: bool = False) -> str | None:
-        """Send a command to the SoundBridge."""
-        if not self._connected or not self._writer or not command.strip():
+    async def send_command(self, command: str) -> None:
+        """Send a command without waiting for response."""
+        await self._send_command(command, wait_for_response=False)
+
+    async def _send_command(
+        self,
+        command: str,
+        wait_for_response: bool = False,
+        disconnect_on_error: bool = True,
+    ) -> Any | None:
+        """Send a command and optionally wait for response."""
+        if not self._connected and not self._closing:
+            await self.connect()
+
+        if not self._connected:
             return None
-        
-        # Base command name for response matching (e.g., 'SetVolume' from 'SetVolume 50')
-        command_name = command.split()[0].lower()
-        
-        async with self._send_lock:
-            if not self._connected or not self._writer:
-                return None
 
+        async with self._lock:
+            command_name = command.split(None, 1)[0].lower()
             future = None
             if wait_for_response:
                 future = asyncio.Future()
-                self._pending_responses.setdefault(command_name, []).append(future)
+                if command_name not in self._pending_responses:
+                    self._pending_responses[command_name] = deque()
+                self._pending_responses[command_name].append(future)
 
             try:
                 _LOGGER.debug("RCP Sending: %s", command)
                 self._writer.write(f"{command}\r\n".encode())
                 await self._writer.drain()
-                
+
                 if future:
+                    # Give it up to 5 seconds to respond
                     return await asyncio.wait_for(future, timeout=5.0)
-                
-                return "SENT"
-            except (Exception, asyncio.CancelledError) as err:
+            except (TimeoutError, OSError, asyncio.CancelledError) as err:
                 _LOGGER.debug("Failed to send command '%s': %s", command, err)
                 if future and command_name in self._pending_responses:
-                    try:
+                    with contextlib.suppress(ValueError):
                         self._pending_responses[command_name].remove(future)
-                    except ValueError:
-                        pass
-                await self._handle_disconnect()
+
+                # Only disconnect if it's a hard error or explicitly requested
+                if disconnect_on_error or isinstance(err, OSError):
+                    self._handle_disconnect()
+
                 if isinstance(err, asyncio.CancelledError) and self._closing:
                     raise
-        
-        return None
+                return None
+            else:
+                return "SENT"
+
+    async def _read_loop(self) -> None:
+        """Loop to read lines from the SoundBridge."""
+        try:
+            while self._connected:
+                line_bytes = await self._reader.readline()
+                if not line_bytes:
+                    break
+                line = line_bytes.decode(errors="replace").strip()
+                if line:
+                    self._parse_line(line)
+        except asyncio.CancelledError:
+            pass
+        except OSError as err:
+            _LOGGER.debug("Error in read loop: %s", err)
+        finally:
+            self._handle_disconnect()
 
     async def _poll_loop(self) -> None:
         """Periodically poll for state."""
         try:
+            consecutive_timeouts = 0
             while self._connected:
-                await self._send_command("GetPowerState", wait_for_response=True)
-                await self._send_command("GetMACAddress", wait_for_response=True)
-                await self._send_command("GetTransportState", wait_for_response=True)
-                await self._send_command("GetVolume", wait_for_response=True)
-                await self._send_command("GetCurrentSongInfo", wait_for_response=True)
-                await self._send_command("GetElapsedTime", wait_for_response=True)
-                await self._send_command("GetTotalTime", wait_for_response=True)
-                await self._send_command("Shuffle", wait_for_response=True)
-                await self._send_command("Repeat", wait_for_response=True)
-                await self._send_command("GetDisplayData", wait_for_response=True)
-                
+                # Always check power state
+                power_res = await self._send_command(
+                    "GetPowerState", wait_for_response=True, disconnect_on_error=False
+                )
+
+                if power_res is None:
+                    consecutive_timeouts += 1
+                    if consecutive_timeouts >= 3:
+                        _LOGGER.warning("Multiple polling timeouts, disconnecting.")
+                        self._handle_disconnect()
+                        break
+                else:
+                    consecutive_timeouts = 0
+
+                # If in standby, don't spam the other commands to prevent timeouts
+                if self.power_state != "standby":
+                    await self._send_command(
+                        "GetMACAddress",
+                        wait_for_response=True,
+                        disconnect_on_error=False,
+                    )
+                    await self._send_command(
+                        "GetTransportState",
+                        wait_for_response=True,
+                        disconnect_on_error=False,
+                    )
+                    await self._send_command(
+                        "GetVolume", wait_for_response=True, disconnect_on_error=False
+                    )
+                    await self._send_command(
+                        "GetCurrentSongInfo",
+                        wait_for_response=True,
+                        disconnect_on_error=False,
+                    )
+                    await self._send_command(
+                        "GetElapsedTime",
+                        wait_for_response=True,
+                        disconnect_on_error=False,
+                    )
+                    await self._send_command(
+                        "GetTotalTime",
+                        wait_for_response=True,
+                        disconnect_on_error=False,
+                    )
+                    await self._send_command(
+                        "Shuffle", wait_for_response=True, disconnect_on_error=False
+                    )
+                    await self._send_command(
+                        "Repeat", wait_for_response=True, disconnect_on_error=False
+                    )
+
                 # Small wait between full poll cycles
                 await asyncio.sleep(5)
 
         except asyncio.CancelledError:
             pass
-
-    async def _read_loop(self) -> None:
-        """Read data from the SoundBridge."""
-        try:
-            while self._reader:
-                line = await self._reader.readline()
-                if not line:
-                    break
-                decoded_line = line.decode().strip()
-                if decoded_line:
-                    self._parse_line(decoded_line)
-        except asyncio.CancelledError:
-            pass
-        except Exception as err:  # pylint: disable=broad-except
-            _LOGGER.debug("Error in read loop: %s", err)
-        finally:
-            await self._handle_disconnect()
+        except (TimeoutError, OSError) as err:
+            _LOGGER.debug("Error in poll loop: %s", err)
 
     def _parse_time(self, time_str: str) -> int:
-        """Parse H:MM:SS to seconds."""
+        """Parse a time string (H:MM:SS or MM:SS) into seconds."""
+        if not time_str:
+            return 0
+        parts = time_str.split(":")
         try:
-            parts = time_str.split(":")
             if len(parts) == 3:
                 return int(parts[0]) * 3600 + int(parts[1]) * 60 + int(parts[2])
             if len(parts) == 2:
                 return int(parts[0]) * 60 + int(parts[1])
-            return int(time_str)
-        except (ValueError, IndexError):
+            if len(parts) == 1:
+                return int(parts[0])
+        except ValueError:
             return 0
+
+        return 0
 
     def _parse_line(self, line: str) -> None:
         """Parse a line from the SoundBridge."""
         _LOGGER.debug("RCP Received: %s", line)
-        
-        if "version" in line.lower() and self.version is None:
-            # Example: Welcome to the SoundBridge Shell version 3.0.44 Release
-            parts = line.split("version")
-            if len(parts) > 1:
-                self.version = parts[1].strip()
 
-        if ":" not in line:
-            if self._list_future and not self._list_future.done():
-                self._current_list.append(line.strip())
+        if self._expecting_display_data:
+            self._expecting_display_data = False
+            try:
+                self.display_data = bytes.fromhex(line.strip())
+            except ValueError:
+                _LOGGER.warning("Failed to decode display data hex")
+            self._resolve_future("getdisplaydata", "OK")
+            self.update_callback()
             return
 
-        parts = line.split(":", 1)
-        command_key = parts[0].strip().lower()
-        value = parts[1].strip()
+        if ":" not in line:
+            # Check for list results
+            if self._list_future and not self._list_future.done():
+                self._current_list.append(line)
+            return
 
-        # Resolve pending command futures
-        if command_key in self._pending_responses:
-            # Special case: for GetCurrentSongInfo, we only resolve on 'OK'
-            # to ensure we've read all metadata lines.
-            should_resolve = True
-            if command_key == "getcurrentsonginfo" and value.lower() != "ok":
-                should_resolve = False
-            
-            if should_resolve:
-                futures = self._pending_responses.get(command_key)
-                if futures:
-                    fut = futures.pop(0)
-                    if not futures:
-                        self._pending_responses.pop(command_key)
-                    if not fut.done():
-                        fut.set_result(value)
+        command_key, value = line.split(":", 1)
+        command_key = command_key.strip().lower()
+        value = value.strip()
 
-        if command_key == "getpowerstate":
-            self.power_state = value.lower()
-        elif command_key == "setpowerstate":
-            if value.lower() == "ok":
-                # We don't know the new state for sure until poll, 
-                # but we can assume success if we just sent standby
-                pass
-            elif value.lower() == "standby":
-                self.power_state = "standby"
-            elif value.lower() == "on":
-                self.power_state = "on"
-        elif command_key == "getmacaddress":
-            self.mac_address = value
-        elif command_key.endswith("listresultsize"):
+        # Handle list boundaries
+        if command_key.endswith("listresultsize"):
             self._current_list = []
-        elif command_key.endswith("listresultend"):
+            return
+        if command_key.endswith("listresultend"):
             if self._list_future and not self._list_future.done():
                 self._list_future.set_result(self._current_list)
+                self._list_future = None
+            return
+
+        # Resolve pending futures
+        self._resolve_future(command_key, value)
+
+        # Update state
+        self._update_state_from_line(command_key, value)
+
+        self.update_callback()
+
+    def _resolve_future(self, command_key: str, value: str) -> None:
+        """Resolve a pending future for a command."""
+        _LOGGER.debug(
+            "_resolve_future called with key=%r, value=%r", command_key, value
+        )
+        if command_key in self._pending_responses:
+            deq = self._pending_responses[command_key]
+            if deq:
+                # Peek at the first future
+                future = deq[0]
+
+                # For GetCurrentSongInfo, it returns multiple lines of metadata.
+                # We should only resolve the future when we see the final "OK"
+                # OR if the first response is an error (like "GenericError").
+                should_resolve = True
+                if command_key == "getcurrentsonginfo":
+                    is_error = value.lower() in {
+                        "genericerror",
+                        "error",
+                        "invalidcommand",
+                    }
+                    is_ok = value.lower() == "ok"
+                    if not is_error and not is_ok:
+                        should_resolve = False
+                elif command_key == "getdisplaydata":
+                    if value.lower().startswith("data bytes"):
+                        should_resolve = False
+
+                _LOGGER.debug("should_resolve=%s for future=%s", should_resolve, future)
+                if should_resolve:
+                    deq.popleft()
+                    if not future.done():
+                        future.set_result(value)
+        else:
+            _LOGGER.debug(
+                "Key %r not in pending responses: %s",
+                command_key,
+                list(self._pending_responses.keys()),
+            )
+
+    def _update_state_from_line(self, command_key: str, value: str) -> None:
+        """Update internal state from a parsed line."""
+        if command_key == "getpowerstate":
+            self.power_state = value.lower()
         elif command_key == "gettransportstate":
             self.state = value.lower()
         elif command_key == "getvolume":
-            try:
+            with contextlib.suppress(ValueError):
                 self.volume = int(value)
-            except ValueError:
-                pass
         elif command_key == "getelapsedtime":
             self.position = self._parse_time(value)
             self.position_updated_at = time.time()
         elif command_key == "gettotaltime":
             self.duration = self._parse_time(value)
-        elif command_key == "shuffle":
-            self.shuffle = value.lower() == "on"
-        elif command_key == "repeat":
-            self.repeat = value.lower()
+        elif command_key == "getmacaddress":
+            self.mac_address = value
+        elif command_key == "getversion":
+            self.version = value
         elif command_key == "getdisplaydata":
-            # The manual says display data for text mode is 2 lines of 40 chars.
-            # It might come as multiple lines or a single string.
-            # We'll split by common delimiters and take the first two meaningful lines.
-            lines = [l.strip() for l in value.split("\r") if l.strip()]
-            if len(lines) >= 2:
-                self.display_lines = lines[:2]
-            elif lines:
-                self.display_lines = [lines[0], ""]
-        elif command_key == "playpreset" and value.lower() == "powerstateon":
-            self.power_state = "on"
-        elif command_key == "play" and value.lower() == "ok":
-            self.state = "play"
-        elif command_key == "pause" and value.lower() == "ok":
-            self.state = "pause"
-        elif command_key == "stop" and value.lower() == "ok":
-            self.state = "stop"
-        elif command_key == "playpause" and value.lower() == "ok":
-            # If we don't know the new state, we'll wait for the next poll
-            # but we could toggle it here if we're sure
-            if self.state == "play":
-                self.state = "pause"
-            elif self.state == "pause":
-                self.state = "play"
+            if value.lower().startswith("data bytes"):
+                self._expecting_display_data = True
+            else:
+                self._parse_display_data(value)
         elif command_key == "getcurrentsonginfo":
-            if ":" in value:
-                info_parts = value.split(":", 1)
-                info_key = info_parts[0].strip().lower()
-                info_val = info_parts[1].strip()
-                
-                self.metadata[info_key] = info_val
+            self._parse_song_info(value)
+        elif command_key == "shuffle":
+            if value.lower() != "ok":
+                self.shuffle = value.lower() == "on"
+        elif command_key == "repeat":
+            if value.lower() != "ok":
+                self.repeat = value.lower()
 
-                if info_key == "title":
-                    self.title = info_val
-                elif info_key == "artist":
-                    self.artist = info_val
-                elif info_key == "album":
-                    self.album = info_val
-                elif info_key == "genre":
-                    self.genre = info_val
-                elif info_key == "resource[0] url" or info_key == "playlisturl":
-                    self.url = info_val
-            elif value.lower() == "ok":
-                # End of song info transaction
-                pass
+    def _parse_display_data(self, value: str) -> None:
+        """Parse display data string."""
+        # It might come as multiple lines or a single string.
+        # We'll split by common delimiters and take the first two meaningful lines.
+        lines = [l_val.strip() for l_val in value.split("\r") if l_val.strip()]
+        if len(lines) >= 2:
+            self.display_lines = lines[:2]
+        elif len(lines) == 1:
+            self.display_lines = [lines[0], ""]
 
-        self.update_callback()
+    def _parse_song_info(self, value: str) -> None:
+        """Parse song info line."""
+        if ":" in value:
+            info_key, info_val = value.split(":", 1)
+            info_key = info_key.strip().lower()
+            info_val = info_val.strip()
 
-    async def _handle_disconnect(self) -> None:
-        """Handle a disconnection."""
-        if self._closing:
-            return
-        
-        was_connected = self._connected
-        self._connected = False
-        self._clear_pending_responses()
-        
-        if was_connected:
-            self.update_callback()
-        
-        self._ensure_reconnect()
-
-    async def _reconnect_loop(self) -> None:
-        """Periodically attempt to reconnect."""
-        while not self._connected and not self._closing:
-            _LOGGER.debug("Attempting to reconnect to Roku SoundBridge at %s:%d", self.host, self.port)
-            if await self.connect():
-                self.update_callback()
-                break
-            await asyncio.sleep(5)
+            if info_key == "title":
+                self.title = info_val
+            elif info_key == "artist":
+                self.artist = info_val
+            elif info_key == "album":
+                self.album = info_val
+            elif info_key == "genre":
+                self.genre = info_val
+            elif info_key in {"resource[0] url", "playlisturl"}:
+                self.url = info_val
+        elif value.lower() == "ok":
+            # End of song info
+            pass
 
     # Media player commands
     async def play(self) -> None:
-        await self._send_command("Play", wait_for_response=True)
+        """Send play command."""
+        await self._send_command("Play", wait_for_response=False)
         self.state = "play"
         self.update_callback()
 
     async def pause(self) -> None:
-        await self._send_command("Pause", wait_for_response=True)
+        """Send pause command."""
+        await self._send_command("Pause", wait_for_response=False)
         self.state = "pause"
         self.update_callback()
 
     async def stop(self) -> None:
-        await self._send_command("Stop", wait_for_response=True)
+        """Send stop command."""
+        await self._send_command("Stop", wait_for_response=False)
         self.state = "stop"
         self.update_callback()
 
     async def next(self) -> None:
-        await self._send_command("Next", wait_for_response=True)
+        """Send next track command."""
+        await self._send_command("Next", wait_for_response=False)
 
     async def previous(self) -> None:
-        await self._send_command("Previous", wait_for_response=True)
+        """Send previous track command."""
+        await self._send_command("Previous", wait_for_response=False)
 
     async def play_url(self, url: str) -> None:
-        await self._send_command(f"PlayStation {url}", wait_for_response=True)
+        """Play a specific URL."""
+        await self._send_command(f"PlayStation {url}", wait_for_response=False)
         self.state = "play"
         self.update_callback()
 
     async def seek(self, position: int) -> None:
+        """Seek to a position in seconds."""
         # Seek doesn't seem directly supported in simple way
-        pass
 
     async def set_volume(self, volume: int) -> None:
-        await self._send_command(f"SetVolume {volume}", wait_for_response=True)
+        """Set volume level (0-100)."""
+        await self._send_command(f"SetVolume {volume}", wait_for_response=False)
         self.volume = volume
         self.update_callback()
 
     async def set_mute(self, mute: bool) -> None:
-        """Simulate mute by setting volume to 0 or restoring it."""
-        if mute:
-            if self.volume > 0:
-                self._pre_mute_volume = self.volume
-            await self.set_volume(0)
-            self.mute = True
-        else:
-            await self.set_volume(self._pre_mute_volume)
-            self.mute = False
+        """Mute or unmute the volume."""
+        mode = "on" if mute else "off"
+        await self._send_command(f"Mute {mode}", wait_for_response=False)
+        self.mute = mute
+        self.update_callback()
 
-    async def play_preset(self, index: int) -> None:
+    async def play_preset(self, preset: int | str) -> None:
         """Play a user preset."""
-        await self._send_command(f"PlayPreset {index}", wait_for_response=True)
+        await self._send_command(f"PlayPreset {preset}", wait_for_response=False)
+        self.power_state = "on"
+        self.update_callback()
 
     async def turn_on(self) -> None:
         """Turn on the SoundBridge."""
-        await self._send_command("PlayPreset 0", wait_for_response=True)
+        await self._send_command("PlayPreset 0", wait_for_response=False)
         self.power_state = "on"
+        self.update_callback()
 
     async def turn_off(self) -> None:
         """Turn off the SoundBridge."""
-        await self._send_command("SetPowerState standby", wait_for_response=True)
+        await self._send_command("SetPowerState standby", wait_for_response=False)
         self.power_state = "standby"
+        self.update_callback()
 
     async def set_shuffle(self, shuffle: bool) -> None:
         """Set shuffle mode."""
         mode = "on" if shuffle else "off"
-        await self._send_command(f"Shuffle {mode}", wait_for_response=True)
+        await self._send_command(f"Shuffle {mode}", wait_for_response=False)
         self.shuffle = shuffle
         self.update_callback()
 
     async def set_repeat(self, repeat_mode: str) -> None:
         """Set repeat mode."""
         # Valid: one, all, none
-        await self._send_command(f"Repeat {repeat_mode}", wait_for_response=True)
+        await self._send_command(f"Repeat {repeat_mode}", wait_for_response=False)
         self.repeat = repeat_mode
         self.update_callback()
 
     async def send_ir_command(self, command: str) -> None:
         """Send an arbitrary IR command."""
-        await self._send_command(f"IrDispatchCommand {command}", wait_for_response=True)
+        await self._send_command(
+            f"IrDispatchCommand {command}", wait_for_response=False
+        )
+
+    async def send_sketch_commands(self, commands: list[str]) -> bool:
+        """Send sketch commands via a persistent port 4444 connection."""
+        if not self._sketch_writer:
+            try:
+                self._sketch_reader, self._sketch_writer = await asyncio.wait_for(
+                    asyncio.open_connection(self.host, 4444), timeout=5.0
+                )
+                self._sketch_writer.write(b"sketch\r\n")
+                await self._sketch_writer.drain()
+                # Wait for sketch prompt
+                buf = b""
+                while b"sketch> " not in buf:
+                    chunk = await asyncio.wait_for(self._sketch_reader.read(1024), timeout=2.0)
+                    if not chunk:
+                        break
+                    buf += chunk
+            except (TimeoutError, OSError, ConnectionRefusedError) as err:
+                _LOGGER.error("Failed to open sketch connection to %s: %s", self.host, err)
+                self._sketch_writer = None
+                return False
+
+        try:
+            chunk_size = 10
+            for i in range(0, len(commands), chunk_size):
+                batch = "\r\n".join(commands[i : i + chunk_size]) + "\r\n"
+                self._sketch_writer.write(batch.encode())
+                await self._sketch_writer.drain()
+                await asyncio.sleep(0.05)
+            return True
+        except (TimeoutError, OSError) as err:
+            _LOGGER.error("Failed to write to sketch connection: %s", err)
+            await self.close_sketch()
+            return False
+
+    async def close_sketch(self) -> None:
+        """Close the sketch connection, returning display to native UI."""
+        if self._sketch_writer:
+            try:
+                self._sketch_writer.write(b"quit\r\n")
+                await self._sketch_writer.drain()
+            except OSError:
+                pass
+            self._sketch_writer.close()
+            with contextlib.suppress(Exception):
+                await self._sketch_writer.wait_closed()
+            self._sketch_writer = None
+            self._sketch_reader = None
+
+    async def get_display_data(self) -> bytes | None:
+        """Get raw display data from the SoundBridge."""
+        # Wait up to 5 seconds for the response
+        if await self._send_command("GetDisplayData", wait_for_response=True):
+            return self.display_data
+        return None
 
     async def _get_list(self, command: str) -> list[str]:
         """Execute a command that returns a list and wait for results."""
@@ -441,7 +658,7 @@ class RcpClient:
 
         if self._list_future and not self._list_future.done():
             self._list_future.cancel()
-        
+
         self._list_future = asyncio.Future()
         if await self._send_command(command) is None:
             if not self._list_future.done():
@@ -450,7 +667,7 @@ class RcpClient:
 
         try:
             return await asyncio.wait_for(self._list_future, timeout=10.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except TimeoutError, asyncio.CancelledError:
             return []
 
     async def list_servers(self) -> list[str]:
@@ -479,8 +696,7 @@ class RcpClient:
 
     async def connect_server(self, index: int) -> bool:
         """Connect to a media server by index."""
-        # This is a transacted command but we'll just check for OK for now
-        # because the 'Connected' token might come later.
-        # But we need to be careful not to trigger it if already connected.
-        await self._send_command(f"ServerConnect {index}")
-        return True
+        resp = await self._send_command(
+            f"ServerConnect {index}", wait_for_response=True
+        )
+        return resp is not None

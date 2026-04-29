@@ -9,7 +9,7 @@
         },
         "data_description": {
           "host": "Hostname or IP address of the Roku SoundBridge.",
-          "port": "Port to connect to the RCP interface (default: 4444)."
+          "port": "Port to connect to the RCP interface (default: 5555)."
         }
       }
     },
@@ -19,6 +19,160 @@
     },
     "abort": {
       "already_configured": "[%key:common::config_flow::abort::already_configured_device%]"
+    }
+  },
+  "services": {
+    "draw_text": {
+      "name": "Draw text",
+      "description": "Draw text on the SoundBridge display using sketch mode.",
+      "fields": {
+        "text": {
+          "name": "Text",
+          "description": "The text to display."
+        },
+        "x": {
+          "name": "X coordinate",
+          "description": "X coordinate or 'c' for center."
+        },
+        "y": {
+          "name": "Y coordinate",
+          "description": "Y coordinate or 'c' for center."
+        },
+        "font": {
+          "name": "Font",
+          "description": "Font number (1-14)."
+        }
+      }
+    },
+    "draw_image": {
+      "name": "Draw image",
+      "description": "Draw an image on the SoundBridge display using sketch mode.",
+      "fields": {
+        "image_path": {
+          "name": "Image path",
+          "description": "Path to the image file."
+        }
+      }
+    },
+    "draw_marquee": {
+      "name": "Draw marquee",
+      "description": "Draw a scrolling marquee on the SoundBridge display.",
+      "fields": {
+        "text": {
+          "name": "Text",
+          "description": "The text to scroll."
+        },
+        "x": {
+          "name": "X coordinate",
+          "description": "Starting X coordinate."
+        },
+        "y": {
+          "name": "Y coordinate",
+          "description": "Starting Y coordinate."
+        },
+        "width": {
+          "name": "Width",
+          "description": "Width of marquee area."
+        },
+        "height": {
+          "name": "Height",
+          "description": "Height of marquee area."
+        },
+        "speed": {
+          "name": "Speed",
+          "description": "Scroll speed."
+        },
+        "font": {
+          "name": "Font",
+          "description": "Font number (1-14)."
+        }
+      }
+    },
+    "draw_text_rendered": {
+      "name": "Draw text (Rendered)",
+      "description": "Draw text using an internal TTF renderer for precise sizing and positioning.",
+      "fields": {
+        "text": {
+          "name": "Text",
+          "description": "The text to display."
+        },
+        "size": {
+          "name": "Font size",
+          "description": "Size of the font in pixels."
+        },
+        "x": {
+          "name": "X coordinate",
+          "description": "X coordinate."
+        },
+        "y": {
+          "name": "Y coordinate",
+          "description": "Y coordinate."
+        },
+        "clear": {
+          "name": "Clear before drawing",
+          "description": "Clear the display before drawing."
+        }
+      }
+    },
+    "draw_icon": {
+      "name": "Draw MDI Icon",
+      "description": "Draw a Material Design Icon on the display.",
+      "fields": {
+        "icon": {
+          "name": "Icon",
+          "description": "Material Design Icon name (e.g. mdi:weather-sunny)."
+        },
+        "size": {
+          "name": "Icon size",
+          "description": "Size of the icon in pixels."
+        },
+        "x": {
+          "name": "X coordinate",
+          "description": "X coordinate."
+        },
+        "y": {
+          "name": "Y coordinate",
+          "description": "Y coordinate."
+        },
+        "clear": {
+          "name": "Clear before drawing",
+          "description": "Clear the display before drawing."
+        }
+      }
+    },
+    "sketch_command": {
+      "name": "Sketch command",
+      "description": "Send a raw sketch sub-shell command.",
+      "fields": {
+        "command": {
+          "name": "Command",
+          "description": "Sketch command (e.g., 'rect 0 0 100 20')."
+        }
+      }
+    },
+    "clear_display": {
+      "name": "Clear display",
+      "description": "Clear the SoundBridge display."
+    },
+    "play_preset": {
+      "name": "Play preset",
+      "description": "Play a specific radio preset by index or name (e.g., A1-A6, B1-B6, or 0-17).",
+      "fields": {
+        "preset": {
+          "name": "Preset",
+          "description": "The preset index (e.g. 0) or ID token (e.g. A1, B3)."
+        }
+      }
+    },
+    "send_command": {
+      "name": "Send command",
+      "description": "Send a raw RCP command.",
+      "fields": {
+        "command": {
+          "name": "Command",
+          "description": "RCP command string."
+        }
+      }
     }
   }
 }

@@ -1,5 +1,9 @@
 """Config flow for Roku SoundBridge integration."""
 
+from __future__ import annotations
+
+import asyncio
+import logging
 from typing import Any
 
 import voluptuous as vol
@@ -9,38 +13,34 @@ from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 
-from .const import DEFAULT_PORT, DOMAIN
 from . import protocol
+from .const import DEFAULT_PORT, DOMAIN
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
-    """Validate the user input allows us to connect.
-
-    Data has the keys from STEP_USER_DATA_SCHEMA with values provided by the user.
-    """
+    """Validate the user input allows us to connect."""
     host = data[CONF_HOST]
     port = data[CONF_PORT]
 
-    # To validate, we try to connect once.
     client = protocol.RcpClient(host, port, lambda: None)
     if not await client.connect():
         raise CannotConnect
 
     # Wait a bit for the mac address to be retrieved
-    import asyncio
     for _ in range(10):
         if client.mac_address:
             break
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)
 
-    mac_address = client.mac_address
+    mac = client.mac_address
     await client.disconnect()
 
-    # Return info that you want to store in the config entry.
-    return {
-        "title": f"Roku SoundBridge ({host})",
-        "mac_address": mac_address,
-    }
+    if not mac:
+        raise CannotConnect
+
+    return {"title": f"SoundBridge ({host})", "unique_id": mac}
 
 
 class RokuSoundBridgeConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -59,12 +59,10 @@ class RokuSoundBridgeConfigFlow(ConfigFlow, domain=DOMAIN):
             except CannotConnect:
                 errors["base"] = "cannot_connect"
             except Exception as err:  # pylint: disable=broad-except
-                import logging
-                logging.getLogger(__name__).error("Unknown error: %s", err, exc_info=err)
+                _LOGGER.error("Unknown error: %s", err, exc_info=err)
                 errors["base"] = "unknown"
             else:
-                unique_id = info.get("mac_address") or f"{user_input[CONF_HOST]}:{user_input[CONF_PORT]}"
-                await self.async_set_unique_id(unique_id)
+                await self.async_set_unique_id(info["unique_id"])
                 self._abort_if_unique_id_configured()
                 return self.async_create_entry(title=info["title"], data=user_input)
 
