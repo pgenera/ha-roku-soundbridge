@@ -109,68 +109,49 @@ async def async_setup_entry(
         "async_send_command",
     )
     platform.async_register_entity_service(
-        "draw_text",
+        "draw",
         {
-            vol.Required("text"): cv.string,
-            vol.Optional("x", default="c"): vol.Any(cv.positive_int, vol.In(["c"])),
-            vol.Optional("y", default="c"): vol.Any(cv.positive_int, vol.In(["c"])),
-            vol.Optional("font", default=3): cv.positive_int,
-        },
-        "async_draw_text",
-    )
-    platform.async_register_entity_service(
-        "draw_image",
-        {
-            vol.Required("image_path"): cv.string,
-        },
-        "async_draw_image",
-    )
-    platform.async_register_entity_service(
-        "draw_marquee",
-        {
-            vol.Required("text"): cv.string,
-            vol.Optional("x", default=0): cv.positive_int,
-            vol.Optional("y", default=0): cv.positive_int,
-            vol.Optional("width", default=512): cv.positive_int,
-            vol.Optional("height", default=32): cv.positive_int,
-            vol.Optional("speed", default=10): cv.positive_int,
-            vol.Optional("font", default=3): cv.positive_int,
-        },
-        "async_draw_marquee",
-    )
-    platform.async_register_entity_service(
-        "sketch_command",
-        {
-            vol.Required("command"): cv.string,
-        },
-        "async_sketch_command",
-    )
-    platform.async_register_entity_service(
-        "draw_text_rendered",
-        {
-            vol.Required("text"): cv.string,
-            vol.Optional("size", default=32): cv.positive_int,
-            vol.Optional("x", default=0): cv.positive_int,
-            vol.Optional("y", default=0): cv.positive_int,
             vol.Optional("clear", default=True): cv.boolean,
+            vol.Required("items"): vol.All(
+                cv.ensure_list,
+                [
+                    vol.Schema(
+                        {
+                            vol.Required("type"): vol.In(
+                                [
+                                    "text",
+                                    "icon",
+                                    "rect",
+                                    "line",
+                                ]
+                            ),
+                            # Fields for 'text' and 'icon'
+                            vol.Optional("text"): cv.string,
+                            vol.Optional("icon"): cv.string,
+                            vol.Optional("size", default=32): cv.positive_int,
+                            vol.Optional("font_path"): cv.string,
+                            vol.Optional("anchor"): cv.string,
+                            vol.Optional("font_index"): cv.positive_int,
+                            # Common fields
+                            vol.Optional("x"): vol.Any(
+                                cv.positive_int, vol.In(["c"])
+                            ),
+                            vol.Optional("y"): vol.Any(
+                                cv.positive_int, vol.In(["c"])
+                            ),
+                            vol.Optional("x1"): cv.positive_int,
+                            vol.Optional("y1"): cv.positive_int,
+                            vol.Optional("x2"): cv.positive_int,
+                            vol.Optional("y2"): cv.positive_int,
+                            vol.Optional("w"): cv.positive_int,
+                            vol.Optional("h"): cv.positive_int,
+                            vol.Optional("filled", default=False): cv.boolean,
+                        }
+                    )
+                ],
+            ),
         },
-        "async_draw_text_rendered",
-    )
-    platform.async_register_entity_service(
-        "draw_icon",
-        {
-            vol.Required("icon"): cv.string,
-            vol.Optional("size", default=32): cv.positive_int,
-            vol.Optional("x", default=0): cv.positive_int,
-            vol.Optional("y", default=0): cv.positive_int,
-            vol.Optional("clear", default=True): cv.boolean,
-        },
-        "async_draw_icon",
-    )
-    platform.async_register_entity_service(
-        "clear_display",
-        {},
-        "async_clear_display",
+        "async_draw",
     )
     platform.async_register_entity_service(
         "play_preset",
@@ -385,129 +366,87 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
         """Play a specific preset by index or name."""
         await self._client.play_preset(preset)
 
-    async def async_draw_text(
-        self, text: str, x: int | str, y: int | str, font: int
-    ) -> None:
-        """Draw text on the display."""
-        commands = ["clear", f"font {font}", f'text {x} {y} "{text}"']
-        await self._client.send_sketch_commands(commands)
+    async def async_draw(self, items: list[dict[str, Any]], clear: bool) -> None:
+        """Draw composited content on the display."""
+        await self._async_ensure_display_ready()
+        width = self._client.display_width
+        height = self._client.display_height
+        
+        commands = []
+        if clear:
+            commands.append("clear")
 
-    async def async_draw_image(self, image_path: str) -> None:
-        """Draw an image on the display."""
-        _LOGGER.debug("Drawing image from: %s", image_path)
+        for item in items:
+            itype = item["type"]
+            x = item.get("x", 0)
+            y = item.get("y", 0)
+            
+            # Support 'c' for centering
+            if x == "c":
+                x = width // 2
+            if y == "c":
+                y = height // 2
 
-        try:
-            if image_path.startswith(("http://", "https://")):
-                session = async_get_clientsession(self.hass)
-                async with session.get(image_path, timeout=10) as response:
-                    if response.status != 200:
-                        _LOGGER.error(
-                            "Failed to download image from %s: %s",
-                            image_path,
-                            response.status,
-                        )
-                        return
-                    data = await response.read()
-                    img = Image.open(io.BytesIO(data))
-            else:
-                path = Path(image_path)
-                if not path.is_absolute():
-                    path = Path(self.hass.config.path(image_path))
+            if itype == "text":
+                text = item.get("text", "")
+                font_path = item.get("font_path")
+                
+                if font_path is not None:
+                    if font_path.lower() == "default":
+                        font_path = None
+                    size = item.get("size", height)
+                    anchor = item.get("anchor")
+                    lines = render_text_to_commands(
+                        text, size=size, x=x, y=y, font_path=font_path, anchor=anchor,
+                        width=width, height=height
+                    )
+                    commands.extend(lines)
+                else:
+                    font_index = item.get("font_index", 3)
+                    commands.append(f"font {font_index}")
+                    commands.append(f'text {x} {y} "{text}"')
 
-                if not path.exists():
-                    _LOGGER.error("Image path does not exist: %s", path)
-                    return
-                img = Image.open(path)
+            elif itype == "icon":
+                icon = item.get("icon", "")
+                icon = icon.removeprefix("mdi:")
+                size = item.get("size", height)
+                anchor = item.get("anchor", "lm")
+                codepoint_hex = MDI_NAME_TO_CODEPOINT.get(icon)
+                if codepoint_hex:
+                    icon_char = chr(int(codepoint_hex, 16))
+                    lines = render_icon_to_commands(
+                        icon_char, size=size, x=x, y=y, anchor=anchor,
+                        width=width, height=height
+                    )
+                    commands.extend(lines)
 
-            # Convert and process image
-            img = img.convert("1")
-            # Resize to fit display if needed
-            if img.width > 512 or img.height > 32:
-                img.thumbnail((512, 32))
+            elif itype == "rect":
+                w = item.get("w", 10)
+                h = item.get("h", 10)
+                filled = item.get("filled", False)
+                cmd = "rect" if filled else "framerect"
+                commands.append(f"{cmd} {x} {y} {w} {h}")
 
-            width, height = img.size
-            commands = ["clear"]
+            elif itype == "line":
+                x1 = item.get("x1", 0)
+                y1 = item.get("y1", 0)
+                x2 = item.get("x2", 10)
+                y2 = item.get("y2", 10)
+                commands.append(f"line {x1} {y1} {x2} {y2}")
 
-            pixels = img.load()
-            for x in range(width):
-                in_segment = False
-                segment_start = 0
-                for y in range(height):
-                    # 0 is black (off), 255 is white (on) in mode "1"
-                    is_on = pixels[x, y] > 128
-                    if is_on and not in_segment:
-                        in_segment = True
-                        segment_start = y
-                    elif not is_on and in_segment:
-                        in_segment = False
-                        commands.append(f"line {x} {segment_start} {x} {y - 1}")
-                if in_segment:
-                    commands.append(f"line {x} {segment_start} {x} {height - 1}")
-
+        if commands:
             await self._client.send_sketch_commands(commands)
-        except (OSError, ValueError) as err:
-            _LOGGER.error("Failed to draw image %s: %s", image_path, err)
 
-    async def async_clear_display(self) -> None:
-        """Clear the display."""
-        await self._client.close_sketch()
-
-    async def async_draw_marquee(
-        self,
-        text: str,
-        x: int,
-        y: int,
-        width: int,
-        height: int,
-        speed: int,
-        font: int,
-    ) -> None:
-        """Draw a marquee on the display."""
-        commands = [
-            "clear",
-            f"font {font}",
-            f'marquee {x} {y} {width} {height} {speed} "{text}"',
-        ]
-        await self._client.send_sketch_commands(commands)
-
-    async def async_draw_text_rendered(
-        self, text: str, size: int, x: int, y: int, clear: bool
-    ) -> None:
-        """Draw text rendered via Pillow on the display."""
-        commands = []
-        if clear:
-            commands.append("clear")
-
-        lines = render_text_to_commands(text, size=size, x=x, y=y)
-        commands.extend(lines)
-
-        await self._client.send_sketch_commands(commands)
-
-    async def async_draw_icon(
-        self, icon: str, size: int, x: int, y: int, clear: bool
-    ) -> None:
-        """Draw an MDI icon rendered via Pillow on the display."""
-        # Strip mdi: prefix if present
-        icon = icon.removeprefix("mdi:")
-
-        codepoint_hex = MDI_NAME_TO_CODEPOINT.get(icon)
-        if not codepoint_hex:
-            _LOGGER.warning("Icon '%s' not found in MDI mapping", icon)
-            return
-
-        icon_char = chr(int(codepoint_hex, 16))
-
-        commands = []
-        if clear:
-            commands.append("clear")
-
-        lines = render_icon_to_commands(icon_char, size=size, x=x, y=y)
-        commands.extend(lines)
-
-        await self._client.send_sketch_commands(commands)
+    async def _async_ensure_display_ready(self) -> None:
+        """Wake the device from standby before using the display."""
+        if self._client.power_state == "standby":
+            _LOGGER.debug("Waking device from standby for display service")
+            await self._client.turn_on()
+            await self._client.wait_for_power_on()
 
     async def async_sketch_command(self, command: str) -> None:
         """Send a raw sketch command."""
+        await self._async_ensure_display_ready()
         await self._client.send_sketch_commands([command])
 
     async def async_browse_media(

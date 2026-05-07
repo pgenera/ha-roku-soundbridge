@@ -56,6 +56,9 @@ class RcpClient:
         self.version = ""
         self.metadata: dict[str, str] = {}
         self.display_data = b""
+        self.display_width = 512
+        self.display_height = 32
+        self._resolution_known = False
 
         self._list_future: asyncio.Future | None = None
         self._current_list: list[str] = []
@@ -301,6 +304,13 @@ class RcpClient:
                 else:
                     consecutive_timeouts = 0
 
+                if not self._resolution_known:
+                    await self._send_command(
+                        "GetDisplayData",
+                        wait_for_response=True,
+                        disconnect_on_error=False,
+                    )
+
                 # If in standby, don't spam the other commands to prevent timeouts
                 if self.power_state != "standby":
                     await self._send_command(
@@ -370,7 +380,23 @@ class RcpClient:
         if self._expecting_display_data:
             self._expecting_display_data = False
             try:
-                self.display_data = bytes.fromhex(line.strip())
+                data = bytes.fromhex(line.strip())
+                self.display_data = data
+                
+                # Dynamically sense resolution from byte count
+                # M1000: 280 * 16 / 8 = 560 bytes
+                # R1000: 280 * 32 / 8 = 1120 bytes
+                # M2000: 512 * 32 / 8 = 2048 bytes
+                if len(data) == 560:
+                    self.display_width = 280
+                    self.display_height = 16
+                elif len(data) == 1120:
+                    self.display_width = 280
+                    self.display_height = 32
+                elif len(data) == 2048:
+                    self.display_width = 512
+                    self.display_height = 32
+                self._resolution_known = True
             except ValueError:
                 _LOGGER.warning("Failed to decode display data hex")
             self._resolve_future("getdisplaydata", "OK")
@@ -569,6 +595,22 @@ class RcpClient:
         await self._send_command("PlayPreset 0", wait_for_response=False)
         self.power_state = "on"
         self.update_callback()
+
+    async def wait_for_power_on(self, timeout: float = 5.0) -> bool:
+        """Poll GetPowerState until the device confirms it is on.
+
+        :param timeout: Maximum seconds to wait.
+        :returns: True if the device confirmed on within the timeout.
+        """
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            result = await self._send_command(
+                "GetPowerState", wait_for_response=True, disconnect_on_error=False
+            )
+            if result and result.lower() != "standby":
+                return True
+            await asyncio.sleep(0.1)
+        return False
 
     async def turn_off(self) -> None:
         """Turn off the SoundBridge."""
