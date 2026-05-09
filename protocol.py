@@ -728,9 +728,17 @@ class RcpClient:
         """List artists on the active server."""
         return await self._get_list("ListArtists")
 
+    async def list_genres(self) -> list[str]:
+        """List genres on the active server."""
+        return await self._get_list("ListGenres")
+
     async def list_playlists(self) -> list[str]:
         """List playlists on the active server."""
         return await self._get_list("ListPlaylists")
+
+    async def list_playlist_songs(self, playlist_index: int) -> list[str]:
+        """List songs in the playlist at the given index of the last ListPlaylists result."""
+        return await self._get_list(f"ListPlaylistSongs {playlist_index}")
 
     async def list_presets(self) -> list[str]:
         """List user presets."""
@@ -742,3 +750,43 @@ class RcpClient:
             f"ServerConnect {index}", wait_for_response=True
         )
         return resp is not None
+
+    async def disconnect_server(self) -> None:
+        """Disconnect from the current server."""
+        await self._send_command("ServerDisconnect", wait_for_response=False)
+
+    async def set_browse_filter_artist(self, name: str) -> None:
+        """Set the artist browse filter (filters subsequent List* commands)."""
+        await self._send_command(
+            f"SetBrowseFilterArtist {name}", wait_for_response=False
+        )
+
+    async def set_browse_filter_album(self, name: str) -> None:
+        """Set the album browse filter (filters subsequent List* commands)."""
+        await self._send_command(
+            f"SetBrowseFilterAlbum {name}", wait_for_response=False
+        )
+
+    async def set_browse_filter_genre(self, name: str) -> None:
+        """Set the genre browse filter (filters subsequent List* commands)."""
+        await self._send_command(
+            f"SetBrowseFilterGenre {name}", wait_for_response=False
+        )
+
+    async def play_index(self, index: int) -> None:
+        """Play the song at index in the last list result."""
+        await self._send_command(f"PlayIndex {index}", wait_for_response=False)
+        self.state = "play"
+        self.update_callback()
+
+    async def queue_and_play(self, index: int) -> None:
+        """Replace the now-playing queue with the last list result and start at index."""
+        await self._send_command(f"QueueAndPlay {index}", wait_for_response=False)
+        self.state = "play"
+        self.update_callback()
+
+    async def queue_and_play_one(self, index: int) -> None:
+        """Replace the now-playing queue with a single song from the last list result."""
+        await self._send_command(f"QueueAndPlayOne {index}", wait_for_response=False)
+        self.state = "play"
+        self.update_callback()

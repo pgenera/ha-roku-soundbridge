@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import io
 import logging
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote
 
 from PIL import Image
 import voluptuous as vol
@@ -61,6 +63,99 @@ REPEAT_MODE_MAP = {
 }
 
 REPEAT_MODE_MAP_REV = {v: k for k, v in REPEAT_MODE_MAP.items()}
+
+# Categorical browse modes. Values become the second segment of a server
+# browse path: servers/<i>/<category>[/<name>[/<track_index>]].
+_CATEGORIES = ("albums", "artists", "genres", "playlists", "songs")
+
+
+@dataclass
+class _ServerNav:
+    """Parsed parts of a servers/... browse path."""
+
+    server_index: int
+    category: str | None = None
+    item_name: str | None = None
+    track_index: int | None = None
+
+
+def _encode(name: str) -> str:
+    """URL-encode a path segment; preserves readability for typical names."""
+    return quote(name, safe="")
+
+
+def _decode(seg: str) -> str:
+    """Decode a previously _encode()-d segment."""
+    return unquote(seg)
+
+
+def _build_song_listing(
+    title: str,
+    content_id: str,
+    song_titles: list[str],
+    make_track_id,
+) -> BrowseMedia:
+    """Build a BrowseMedia directory whose children are playable song leaves."""
+    children = [
+        BrowseMedia(
+            title=name or f"Track {i + 1}",
+            media_class=MediaClass.TRACK,
+            media_content_id=make_track_id(i),
+            media_content_type=MediaType.MUSIC,
+            can_play=True,
+            can_expand=False,
+        )
+        for i, name in enumerate(song_titles)
+    ]
+    return BrowseMedia(
+        title=title,
+        media_class=MediaClass.DIRECTORY,
+        media_content_id=content_id,
+        media_content_type=MediaType.PLAYLIST,
+        can_play=False,
+        can_expand=True,
+        children=children,
+    )
+
+
+def _parse_server_path(media_id: str) -> _ServerNav | None:
+    """Parse a servers/... path into its parts, or return None if malformed.
+
+    Examples:
+        servers/0                              -> server root
+        servers/0/albums                       -> list of albums
+        servers/0/albums/Some%20Album          -> songs in album
+        servers/0/albums/Some%20Album/3        -> play track 3 in album
+        servers/0/songs/12                     -> play track 12 from all songs
+    """
+    parts = media_id.split("/")
+    if len(parts) < 2 or parts[0] != "servers":
+        return None
+    try:
+        server_index = int(parts[1])
+    except ValueError:
+        return None
+    nav = _ServerNav(server_index=server_index)
+    if len(parts) >= 3:
+        category = parts[2]
+        if category not in _CATEGORIES:
+            return None
+        nav.category = category
+    if len(parts) >= 4:
+        # For "songs", parts[3] is a track index, not an item name
+        if nav.category == "songs":
+            try:
+                nav.track_index = int(parts[3])
+            except ValueError:
+                return None
+        else:
+            nav.item_name = _decode(parts[3])
+    if len(parts) >= 5 and nav.category != "songs":
+        try:
+            nav.track_index = int(parts[4])
+        except ValueError:
+            return None
+    return nav
 
 
 async def async_setup_platform(
@@ -324,15 +419,80 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
     async def async_play_media(
         self, media_type: MediaType | str, media_id: str, **kwargs: Any
     ) -> None:
-        """Play media."""
+        """Play media.
+
+        Supported media_id forms:
+          play_preset:<index>             play user preset by zero-based index (0..17)
+          servers/<i>/<cat>/<name>/<n>    play song <n> on server <i> filtered by
+                                          category <cat> and item <name>; <cat> is
+                                          one of albums, artists, genres, playlists
+          servers/<i>/songs/<n>           play song <n> from the unfiltered song list
+          connect_server:<i>              (legacy) connect to server <i>
+          <url>                           play an arbitrary URL via PlayStation
+        """
         if media_id.startswith("play_preset:"):
-            preset_index = int(media_id.split(":")[1])
+            preset_index = int(media_id.split(":", 1)[1])
             await self._client.play_preset(preset_index)
-        elif media_id.startswith("connect_server:"):
-            server_index = int(media_id.split(":")[1])
+            return
+        if media_id.startswith("connect_server:"):
+            server_index = int(media_id.split(":", 1)[1])
             await self._client.connect_server(server_index)
-        else:
-            await self._client.play_url(media_id)
+            return
+        if media_id.startswith("servers/"):
+            await self._async_play_server_track(media_id)
+            return
+        await self._client.play_url(media_id)
+
+    async def _async_play_server_track(self, media_id: str) -> None:
+        """Resolve a server/<i>/<cat>/<name>/<index> path and play it.
+
+        Re-runs the listing right before PlayIndex so the SoundBridge's "last
+        list result" matches what we computed the index against — the device
+        only keeps one list at a time and any other command (or another HA
+        browser session) could have clobbered it.
+        """
+        nav = _parse_server_path(media_id)
+        if nav is None or nav.track_index is None:
+            raise ValueError(f"Not a playable server path: {media_id}")
+        await self._client.connect_server(nav.server_index)
+        await self._refresh_filtered_song_list(nav.category, nav.item_name)
+        await self._client.play_index(nav.track_index)
+
+    async def _refresh_filtered_song_list(
+        self, category: str | None, item_name: str | None
+    ) -> list[str]:
+        """Apply browse filters and run the list command matching the path.
+
+        Returns the resulting list of song titles, and leaves the SoundBridge's
+        "last list result" populated so a subsequent PlayIndex picks the right
+        song.
+        """
+        if category in (None, "songs"):
+            return await self._client.list_songs()
+        if category == "albums":
+            await self._client.set_browse_filter_album(item_name or "")
+            return await self._client.list_songs()
+        if category == "artists":
+            await self._client.set_browse_filter_artist(item_name or "")
+            return await self._client.list_songs()
+        if category == "genres":
+            await self._client.set_browse_filter_genre(item_name or "")
+            return await self._client.list_songs()
+        if category == "playlists":
+            # Playlist contents are addressed by playlist index, not name —
+            # the index comes from the last ListPlaylists result, so we re-run
+            # ListPlaylists to populate the SoundBridge's list, then map name
+            # to index, then ListPlaylistSongs <index>.
+            playlists = await self._client.list_playlists()
+            try:
+                idx = playlists.index(item_name) if item_name else 0
+            except ValueError:
+                _LOGGER.warning(
+                    "Playlist %r not found in current ListPlaylists result", item_name
+                )
+                idx = 0
+            return await self._client.list_playlist_songs(idx)
+        raise ValueError(f"Unknown browse category: {category!r}")
 
     async def async_turn_on(self) -> None:
         """Turn on the media player."""
@@ -454,23 +614,42 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
         media_content_type: str | None = None,
         media_content_id: str | None = None,
     ) -> BrowseMedia:
-        """Implement the browsing of media."""
-        if media_content_id is None:
+        """Implement the browsing of media.
+
+        Hierarchy:
+            (root)
+            ├── presets                           leaf-list of all 18 presets
+            └── servers
+                └── servers/<i>                   per-server category menu
+                    ├── servers/<i>/albums        list of album names
+                    │   └── servers/<i>/albums/<name>
+                    ├── servers/<i>/artists
+                    │   └── servers/<i>/artists/<name>
+                    ├── servers/<i>/genres
+                    │   └── servers/<i>/genres/<name>
+                    ├── servers/<i>/playlists
+                    │   └── servers/<i>/playlists/<name>
+                    └── servers/<i>/songs
+        """
+        if media_content_id is None or media_content_id == "root":
             return await self._async_browse_root()
-
-        if media_content_id.startswith("presets"):
+        if media_content_id == "presets":
             return await self._async_browse_presets()
-
-        if media_content_id.startswith("servers"):
+        if media_content_id == "servers":
             return await self._async_browse_servers()
-
-        raise ValueError(f"Unknown media_content_id: {media_content_id}")
+        nav = _parse_server_path(media_content_id)
+        if nav is None:
+            raise ValueError(f"Unknown media_content_id: {media_content_id}")
+        if nav.category is None:
+            return await self._async_browse_server_root(nav.server_index)
+        if nav.item_name is None and nav.track_index is None:
+            return await self._async_browse_category(nav.server_index, nav.category)
+        # We're at a category-item (e.g., a specific album) — show its songs.
+        return await self._async_browse_category_item(nav)
 
     async def _async_browse_root(self) -> BrowseMedia:
         """Browse the root."""
-        children = []
-
-        children.append(
+        children = [
             BrowseMedia(
                 title="Presets",
                 media_class=MediaClass.DIRECTORY,
@@ -478,10 +657,7 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
                 media_content_type=MediaType.PLAYLIST,
                 can_play=False,
                 can_expand=True,
-            )
-        )
-
-        children.append(
+            ),
             BrowseMedia(
                 title="Servers",
                 media_class=MediaClass.DIRECTORY,
@@ -489,9 +665,8 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
                 media_content_type=MediaType.PLAYLIST,
                 can_play=False,
                 can_expand=True,
-            )
-        )
-
+            ),
+        ]
         return BrowseMedia(
             title="Roku SoundBridge",
             media_class=MediaClass.DIRECTORY,
@@ -502,23 +677,44 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
             children=children,
         )
 
-    async def _async_browse_servers(self) -> BrowseMedia:
-        """Browse servers."""
-        servers = await self._client.list_servers()
-        children = []
-
-        for i, title in enumerate(servers):
-            children.append(
-                BrowseMedia(
-                    title=title or f"Server {i}",
-                    media_class=MediaClass.DIRECTORY,
-                    media_content_id=f"connect_server:{i}",
-                    media_content_type=MediaType.PLAYLIST,
-                    can_play=True,
-                    can_expand=False,
-                )
+    async def _async_browse_presets(self) -> BrowseMedia:
+        """Browse presets."""
+        presets = await self._client.list_presets()
+        children = [
+            BrowseMedia(
+                title=title or f"Preset {i + 1}",
+                media_class=MediaClass.MUSIC,
+                media_content_id=f"play_preset:{i}",
+                media_content_type=MediaType.MUSIC,
+                can_play=True,
+                can_expand=False,
             )
+            for i, title in enumerate(presets)
+        ]
+        return BrowseMedia(
+            title="Presets",
+            media_class=MediaClass.DIRECTORY,
+            media_content_id="presets",
+            media_content_type=MediaType.PLAYLIST,
+            can_play=False,
+            can_expand=True,
+            children=children,
+        )
 
+    async def _async_browse_servers(self) -> BrowseMedia:
+        """List available servers (each is a sub-directory, not directly playable)."""
+        servers = await self._client.list_servers()
+        children = [
+            BrowseMedia(
+                title=title or f"Server {i}",
+                media_class=MediaClass.DIRECTORY,
+                media_content_id=f"servers/{i}",
+                media_content_type=MediaType.PLAYLIST,
+                can_play=False,
+                can_expand=True,
+            )
+            for i, title in enumerate(servers)
+        ]
         return BrowseMedia(
             title="Servers",
             media_class=MediaClass.DIRECTORY,
@@ -529,29 +725,93 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
             children=children,
         )
 
-    async def _async_browse_presets(self) -> BrowseMedia:
-        """Browse presets."""
-        presets = await self._client.list_presets()
-        children = []
-
-        for i, title in enumerate(presets):
-            children.append(
-                BrowseMedia(
-                    title=title or f"Preset {i + 1}",
-                    media_class=MediaClass.MUSIC,
-                    media_content_id=f"play_preset:{i}",
-                    media_content_type=MediaType.MUSIC,
-                    can_play=True,
-                    can_expand=False,
-                )
+    async def _async_browse_server_root(self, server_index: int) -> BrowseMedia:
+        """Show the category menu (Albums/Artists/Genres/Playlists/Songs) for a server."""
+        await self._client.connect_server(server_index)
+        category_titles = {
+            "albums": "Albums",
+            "artists": "Artists",
+            "genres": "Genres",
+            "playlists": "Playlists",
+            "songs": "All Songs",
+        }
+        children = [
+            BrowseMedia(
+                title=category_titles[cat],
+                media_class=MediaClass.DIRECTORY,
+                media_content_id=f"servers/{server_index}/{cat}",
+                media_content_type=MediaType.PLAYLIST,
+                can_play=False,
+                can_expand=True,
             )
-
+            for cat in _CATEGORIES
+        ]
         return BrowseMedia(
-            title="Presets",
+            title=f"Server {server_index}",
             media_class=MediaClass.DIRECTORY,
-            media_content_id="presets",
+            media_content_id=f"servers/{server_index}",
             media_content_type=MediaType.PLAYLIST,
             can_play=False,
             can_expand=True,
             children=children,
+        )
+
+    async def _async_browse_category(
+        self, server_index: int, category: str
+    ) -> BrowseMedia:
+        """List items in a category (album names, artist names, etc.)."""
+        await self._client.connect_server(server_index)
+        if category == "albums":
+            items = await self._client.list_albums()
+            child_class = MediaClass.ALBUM
+        elif category == "artists":
+            items = await self._client.list_artists()
+            child_class = MediaClass.ARTIST
+        elif category == "genres":
+            items = await self._client.list_genres()
+            child_class = MediaClass.GENRE
+        elif category == "playlists":
+            items = await self._client.list_playlists()
+            child_class = MediaClass.PLAYLIST
+        elif category == "songs":
+            songs = await self._client.list_songs()
+            return _build_song_listing(
+                title="All Songs",
+                content_id=f"servers/{server_index}/songs",
+                song_titles=songs,
+                make_track_id=lambda i: f"servers/{server_index}/songs/{i}",
+            )
+        else:
+            raise ValueError(f"Unknown category: {category}")
+        children = [
+            BrowseMedia(
+                title=name or f"Item {i + 1}",
+                media_class=child_class,
+                media_content_id=f"servers/{server_index}/{category}/{_encode(name)}",
+                media_content_type=MediaType.PLAYLIST,
+                can_play=False,
+                can_expand=True,
+            )
+            for i, name in enumerate(items)
+        ]
+        return BrowseMedia(
+            title=category.capitalize(),
+            media_class=MediaClass.DIRECTORY,
+            media_content_id=f"servers/{server_index}/{category}",
+            media_content_type=MediaType.PLAYLIST,
+            can_play=False,
+            can_expand=True,
+            children=children,
+        )
+
+    async def _async_browse_category_item(self, nav: _ServerNav) -> BrowseMedia:
+        """List songs filtered by a specific album/artist/genre/playlist."""
+        await self._client.connect_server(nav.server_index)
+        songs = await self._refresh_filtered_song_list(nav.category, nav.item_name)
+        encoded_name = _encode(nav.item_name or "")
+        return _build_song_listing(
+            title=nav.item_name or (nav.category or "Songs").capitalize(),
+            content_id=f"servers/{nav.server_index}/{nav.category}/{encoded_name}",
+            song_titles=songs,
+            make_track_id=lambda i: f"servers/{nav.server_index}/{nav.category}/{encoded_name}/{i}",
         )
