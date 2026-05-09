@@ -106,19 +106,20 @@ async def test_rcp_client_list_commands(update_callback) -> None:
     client._connected = True
     client._writer.drain = AsyncMock()
 
-    # Test list_presets
+    # Test list_presets — uses the real wire format observed from the device:
+    # "<Cmd>: ListResultSize N", "<Cmd>: <item>", "<Cmd>: ListResultEnd".
     task = asyncio.create_task(client.list_presets())
     await asyncio.sleep(0.01)
     assert client._writer.write.called
 
-    # Simulate list response
-    client._parse_line("ListPresetsListResultSize: 2")
-    client._parse_line("Preset 1")
-    client._parse_line("Preset 2")
-    client._parse_line("ListPresetsListResultEnd: OK")
+    client._parse_line("ListPresets: ListResultSize 3")
+    client._parse_line("ListPresets: KQED 88.5 FM")
+    client._parse_line("ListPresets: WBUR 90.9 FM")
+    client._parse_line("ListPresets: ")
+    client._parse_line("ListPresets: ListResultEnd")
 
     presets = await task
-    assert presets == ["Preset 1", "Preset 2"]
+    assert presets == ["KQED 88.5 FM", "WBUR 90.9 FM", ""]
 
     # Verify other list methods exist and follow same pattern
     list_methods = [
@@ -132,9 +133,9 @@ async def test_rcp_client_list_commands(update_callback) -> None:
     for method, cmd in list_methods:
         task = asyncio.create_task(method())
         await asyncio.sleep(0.01)
-        client._parse_line(f"{cmd}ListResultSize: 1")
-        client._parse_line("Item 1")
-        client._parse_line(f"{cmd}ListResultEnd: OK")
+        client._parse_line(f"{cmd}: ListResultSize 1")
+        client._parse_line(f"{cmd}: Item 1")
+        client._parse_line(f"{cmd}: ListResultEnd")
         result = await task
         assert result == ["Item 1"]
 
@@ -291,3 +292,28 @@ async def test_rcp_client_disconnection_during_command(update_callback) -> None:
     result = await task
     assert result is None
     assert client._connected is False
+
+def test_rcp_client_display_resolution_detection() -> None:
+    """Test dynamic display resolution detection from GetDisplayData byte length."""
+    client = RcpClient("127.0.0.1", 4444, lambda: None)
+    
+    # Simulate M2000 (2048 bytes)
+    client._expecting_display_data = True
+    m2000_data = "ff" * 2048
+    client._parse_line(m2000_data)
+    assert client.display_width == 512
+    assert client.display_height == 32
+    
+    # Simulate M1000 (560 bytes)
+    client._expecting_display_data = True
+    m1000_data = "ff" * 560
+    client._parse_line(m1000_data)
+    assert client.display_width == 280
+    assert client.display_height == 16
+    
+    # Simulate R1000 (1120 bytes)
+    client._expecting_display_data = True
+    r1000_data = "ff" * 1120
+    client._parse_line(r1000_data)
+    assert client.display_width == 280
+    assert client.display_height == 32

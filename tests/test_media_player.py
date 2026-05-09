@@ -281,13 +281,26 @@ async def test_browse_root(hass: HomeAssistant, mock_client) -> None:
 
 @pytest.mark.asyncio
 async def test_browse_presets(hass, mock_client) -> None:
-    mock_client.list_presets = AsyncMock(return_value=["KQED", "KCRW", ""])
+    """Empty preset slots should be skipped, named ones kept with original index.
+
+    Empty includes both '' (this device's behaviour) and the literal
+    'Preset NN' placeholders some firmware returns for unset slots.
+    """
+    mock_client.list_presets = AsyncMock(
+        return_value=["KQED", "KCRW", "", "  ", "Preset 5", "BBC World", "preset 7"]
+    )
     player = RokuSoundBridgeMediaPlayer(mock_client, "M", "e", "u")
     player.hass = hass
     node = await player.async_browse_media(media_content_id="presets")
     assert node.media_content_id == "presets"
-    assert [c.title for c in node.children] == ["KQED", "KCRW", "Preset 3"]
-    assert node.children[0].media_content_id == "play_preset:0"
+    assert [c.title for c in node.children] == ["KQED", "KCRW", "BBC World"]
+    # The slot index in the content_id must match the original device slot
+    # (otherwise PlayPreset would target the wrong preset).
+    assert [c.media_content_id for c in node.children] == [
+        "play_preset:0",
+        "play_preset:1",
+        "play_preset:5",
+    ]
     assert node.children[0].can_play is True
     assert node.children[0].can_expand is False
 

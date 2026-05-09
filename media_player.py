@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import io
 import logging
 from pathlib import Path
+import re
 from typing import Any
 from urllib.parse import quote, unquote
 
@@ -67,6 +68,16 @@ REPEAT_MODE_MAP_REV = {v: k for k, v in REPEAT_MODE_MAP.items()}
 # Categorical browse modes. Values become the second segment of a server
 # browse path: servers/<i>/<category>[/<name>[/<track_index>]].
 _CATEGORIES = ("albums", "artists", "genres", "playlists", "songs")
+
+# Some firmware variants return unset preset slots as the literal string
+# "Preset 11", "Preset 12", etc. — surface only "real" presets.
+_EMPTY_PRESET_RE = re.compile(r"^\s*Preset\s+\d+\s*$", re.IGNORECASE)
+
+
+def _is_empty_preset(title: str | None) -> bool:
+    if not title or not title.strip():
+        return True
+    return bool(_EMPTY_PRESET_RE.match(title))
 
 
 @dataclass
@@ -678,11 +689,11 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
         )
 
     async def _async_browse_presets(self) -> BrowseMedia:
-        """Browse presets."""
+        """Browse presets, skipping unset slots."""
         presets = await self._client.list_presets()
         children = [
             BrowseMedia(
-                title=title or f"Preset {i + 1}",
+                title=title,
                 media_class=MediaClass.MUSIC,
                 media_content_id=f"play_preset:{i}",
                 media_content_type=MediaType.MUSIC,
@@ -690,6 +701,7 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
                 can_expand=False,
             )
             for i, title in enumerate(presets)
+            if not _is_empty_preset(title)
         ]
         return BrowseMedia(
             title="Presets",

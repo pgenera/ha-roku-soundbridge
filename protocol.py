@@ -404,7 +404,8 @@ class RcpClient:
             return
 
         if ":" not in line:
-            # Check for list results
+            # Lines without a colon may appear during list collection on some
+            # firmware variants — treat them as bare list items.
             if self._list_future and not self._list_future.done():
                 self._current_list.append(line)
             return
@@ -413,14 +414,23 @@ class RcpClient:
         command_key = command_key.strip().lower()
         value = value.strip()
 
-        # Handle list boundaries
-        if command_key.endswith("listresultsize"):
+        # List boundaries are signalled in the VALUE half of the response,
+        # not the command_key. The wire format is "<Cmd>: ListResultSize <N>"
+        # and "<Cmd>: ListResultEnd". Skip transaction markers as well.
+        if value.startswith("ListResultSize"):
             self._current_list = []
             return
-        if command_key.endswith("listresultend"):
+        if value == "ListResultEnd":
             if self._list_future and not self._list_future.done():
                 self._list_future.set_result(self._current_list)
                 self._list_future = None
+            return
+        if value in ("TransactionInitiated", "TransactionComplete", "TransactionCanceled"):
+            return
+
+        # If we're mid-list, the value is a list item (e.g. a preset name).
+        if self._list_future and not self._list_future.done():
+            self._current_list.append(value)
             return
 
         # Resolve pending futures
