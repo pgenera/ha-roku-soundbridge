@@ -25,9 +25,11 @@ _LOGGER = logging.getLogger(__name__)
 
 @pytest.mark.enable_socket
 @pytest.mark.asyncio
-async def test_integration_full_user_journey(hass: HomeAssistant) -> None:
-    """Test a full user journey using the real RCP protocol against localhost:5555."""
-    host = "127.0.0.1"
+async def test_integration_full_user_journey(
+    hass: HomeAssistant, soundbridge_host: str
+) -> None:
+    """Test a full user journey using the real RCP protocol."""
+    host = soundbridge_host
     port = 5555
     entry = MockConfigEntry(
         domain=DOMAIN,

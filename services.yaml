@@ -1,99 +1,32 @@
-draw_text:
-  name: Draw text
-  description: Draw text on the SoundBridge display using sketch mode.
+draw:
+  name: Draw composited layout
+  description: Draw a complex layout on the SoundBridge display using a list of items (text, icon, native primitives).
   target:
     entity:
       integration: roku_soundbridge
       domain: media_player
   fields:
-    text:
-      name: Text
-      description: The text to display.
-      example: "Hello HA"
+    clear:
+      name: Clear before drawing
+      description: Clear the display before drawing the new layout.
+      default: true
+      required: false
+      selector:
+        boolean:
+    items:
+      name: Items
+      description: List of items to draw.
       required: true
       selector:
-        text:
-    x:
-      name: X coordinate
-      description: X coordinate or 'c' for center.
-      default: c
-      required: false
-    y:
-      name: Y coordinate
-      description: Y coordinate or 'c' for center.
-      default: c
-      required: false
-    font:
-      name: Font
-      description: Font number (1-14).
-      default: 3
-      required: false
-      selector:
-        number:
-          min: 1
-          max: 20
+        object:
 
-draw_image:
-  name: Draw image
-  description: Draw an image on the SoundBridge display. Supports local file paths or remote URLs.
+clear_display:
+  name: Clear display
+  description: Clear the SoundBridge display.
   target:
     entity:
       integration: roku_soundbridge
       domain: media_player
-  fields:
-    image_path:
-      name: Image path
-      description: Path to the local image file or a remote URL (http/https).
-      example: "/config/www/roku_icon.png"
-      required: true
-      selector:
-        text:
-
-draw_marquee:
-  name: Draw marquee
-  description: Draw a scrolling marquee on the SoundBridge display.
-  target:
-    entity:
-      integration: roku_soundbridge
-      domain: media_player
-  fields:
-    text:
-      name: Text
-      description: The text to scroll.
-      example: "Breaking News: SoundBridge is back!"
-      required: true
-      selector:
-        text:
-    x:
-      name: X coordinate
-      description: Starting X coordinate.
-      default: 0
-      required: false
-    y:
-      name: Y coordinate
-      description: Starting Y coordinate.
-      default: 0
-      required: false
-    width:
-      name: Width
-      description: Width of marquee area.
-      default: 512
-      required: false
-    height:
-      name: Height
-      description: Height of marquee area.
-      default: 32
-      required: false
-    speed:
-      name: Speed
-      description: Scroll speed.
-      default: 10
-      required: false
-    font:
-      name: Font
-      description: Font number (1-14).
-      default: 3
-      required: false
 
 sketch_command:
   name: Sketch command
@@ -110,114 +43,6 @@ sketch_command:
       required: true
       selector:
         text:
-
-draw_text_rendered:
-  name: Draw text (Rendered)
-  description: Draw text on the SoundBridge display using an internal TTF renderer for precise sizing and positioning.
-  target:
-    entity:
-      integration: roku_soundbridge
-      domain: media_player
-  fields:
-    text:
-      name: Text
-      description: The text to display.
-      example: "Hello HA"
-      required: true
-      selector:
-        text:
-    size:
-      name: Font size
-      description: Size of the font in pixels. Use 32 for full height, 16 for half height.
-      default: 32
-      required: false
-      selector:
-        number:
-          min: 8
-          max: 64
-    x:
-      name: X coordinate
-      description: X coordinate for the top-left of the text.
-      default: 0
-      required: false
-      selector:
-        number:
-          min: 0
-          max: 512
-    y:
-      name: Y coordinate
-      description: Y coordinate for the top-left of the text.
-      default: 0
-      required: false
-      selector:
-        number:
-          min: 0
-          max: 32
-    clear:
-      name: Clear before drawing
-      description: Clear the display before drawing the text.
-      default: true
-      required: false
-      selector:
-        boolean:
-
-draw_icon:
-  name: Draw MDI Icon
-  description: Draw a Material Design Icon on the SoundBridge display.
-  target:
-    entity:
-      integration: roku_soundbridge
-      domain: media_player
-  fields:
-    icon:
-      name: Icon
-      description: Material Design Icon name (e.g. mdi:weather-sunny).
-      example: "mdi:weather-sunny"
-      required: true
-      selector:
-        text:
-    size:
-      name: Icon size
-      description: Size of the icon in pixels.
-      default: 32
-      required: false
-      selector:
-        number:
-          min: 8
-          max: 64
-    x:
-      name: X coordinate
-      description: X coordinate.
-      default: 0
-      required: false
-      selector:
-        number:
-          min: 0
-          max: 512
-    y:
-      name: Y coordinate
-      description: Y coordinate.
-      default: 0
-      required: false
-      selector:
-        number:
-          min: 0
-          max: 32
-    clear:
-      name: Clear before drawing
-      description: Clear the display before drawing the icon.
-      default: true
-      required: false
-      selector:
-        boolean:
-
-clear_display:
-  name: Clear display
-  description: Clear the SoundBridge display.
-  target:
-    entity:
-      integration: roku_soundbridge
-      domain: media_player
 
 send_command:
   name: Send command

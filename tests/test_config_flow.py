@@ -22,14 +22,14 @@ async def test_user_form(hass: HomeAssistant) -> None:
 
     with (
         patch(
-            "custom_components.roku_soundbridge.config_flow.validate_input",
+            "homeassistant.components.roku_soundbridge.config_flow.validate_input",
             return_value={
                 "title": "Roku SoundBridge (127.0.0.1)",
                 "unique_id": "00:11:22:33:44:55",
             },
         ),
         patch(
-            "custom_components.roku_soundbridge.async_setup_entry",
+            "homeassistant.components.roku_soundbridge.async_setup_entry",
             return_value=True,
         ) as mock_setup_entry,
     ):
@@ -59,8 +59,9 @@ async def test_user_form_cannot_connect(hass: HomeAssistant) -> None:
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
 
+    from homeassistant.components.roku_soundbridge.config_flow import CannotConnect
     with patch(
-        "custom_components.roku_soundbridge.config_flow.validate_input",
+        "homeassistant.components.roku_soundbridge.config_flow.validate_input",
         side_effect=CannotConnect,
     ):
         result2 = await hass.config_entries.flow.async_configure(
@@ -83,7 +84,7 @@ async def test_user_form_unknown_error(hass: HomeAssistant) -> None:
     )
 
     with patch(
-        "custom_components.roku_soundbridge.config_flow.validate_input",
+        "homeassistant.components.roku_soundbridge.config_flow.validate_input",
         side_effect=Exception("Unknown error"),
     ):
         result2 = await hass.config_entries.flow.async_configure(

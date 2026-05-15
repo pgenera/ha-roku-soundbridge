@@ -45,6 +45,8 @@ def render_text_to_commands(
     size: int = 32,
     x: int = 0,
     y: int = 0,
+    font_path: str | None = None,
+    anchor: str | None = None,
     width: int = 512,
     height: int = 32,
 ) -> list[str]:
@@ -53,25 +55,31 @@ def render_text_to_commands(
         _LOGGER.error("Pillow is not installed. Cannot render text.")
         return []
 
-    font_path = get_font_path("Roboto-Regular.ttf")
+    if font_path is None:
+        font_path = get_font_path("Roboto-Regular.ttf")
+
     try:
         font = ImageFont.truetype(font_path, size)
     except Exception as err:
-        _LOGGER.warning("Failed to load Roboto font, falling back: %s", err)
+        _LOGGER.warning("Failed to load font %s, falling back: %s", font_path, err)
         font = ImageFont.load_default()
 
-    # Use a larger temporary image to prevent clipping during measurement
-    # though with 1-bit mode we can just draw and Pillow handles it.
     img = Image.new("1", (width, height), 0)
     draw = ImageDraw.Draw(img)
 
-    # If Y is default (0), we vertically center the text
-    # We use 'lm' (left, middle) anchor for consistent vertical centering
-    # If the user specified a Y, we use 'lt' (left, top) anchor
-    if y == 0:
-        draw.text((x, height // 2), text, font=font, fill=1, anchor="lm")
+    # Use specified anchor or calculate default
+    if anchor is None:
+        # Default to centered if y is 0, otherwise top-left
+        if y == 0:
+            anchor = "lm"
+            draw_y = height // 2
+        else:
+            anchor = "lt"
+            draw_y = y
     else:
-        draw.text((x, y), text, font=font, fill=1, anchor="lt")
+        draw_y = y
+
+    draw.text((x, draw_y), text, font=font, fill=1, anchor=anchor)
 
     return _image_to_lines(img, width, height)
 
@@ -81,6 +89,7 @@ def render_icon_to_commands(
     size: int = 32,
     x: int = 0,
     y: int = 0,
+    anchor: str = "lm",
     width: int = 512,
     height: int = 32,
 ) -> list[str]:
@@ -100,10 +109,8 @@ def render_icon_to_commands(
     draw = ImageDraw.Draw(img)
 
     # Icons are almost always best vertically centered
-    if y == 0:
-        draw.text((x, height // 2), icon_codepoint, font=font, fill=1, anchor="lm")
-    else:
-        draw.text((x, y), icon_codepoint, font=font, fill=1, anchor="lt")
+    draw_y = y if anchor != "lm" else height // 2
+    draw.text((x, draw_y), icon_codepoint, font=font, fill=1, anchor=anchor)
 
     return _image_to_lines(img, width, height)
 
