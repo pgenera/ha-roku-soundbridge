@@ -32,6 +32,10 @@ class RcpClient:
         self._read_task: asyncio.Task | None = None
         self._poll_task: asyncio.Task | None = None
         self._reconnect_task: asyncio.Task | None = None
+        # Hold a reference to background cleanup tasks so they aren't
+        # GC'd mid-await (CPython warns "Task was destroyed but it is pending"
+        # and the writer fd it was closing would leak).
+        self._cleanup_tasks: set[asyncio.Task] = set()
 
         self._sketch_reader: asyncio.StreamReader | None = None
         self._sketch_writer: asyncio.StreamWriter | None = None
@@ -157,7 +161,11 @@ class RcpClient:
 
         # Perform cleanup in a separate task so we don't block or get cancelled
         # if the current task (read/poll loop) is about to be cancelled.
-        asyncio.create_task(self._cleanup_connection(was_connected))
+        # Keep a strong reference until the task finishes — otherwise it can be
+        # garbage-collected mid-await and the writer fd it closes leaks.
+        task = asyncio.create_task(self._cleanup_connection(was_connected))
+        self._cleanup_tasks.add(task)
+        task.add_done_callback(self._cleanup_tasks.discard)
         self._ensure_reconnect()
 
     async def _cleanup_connection(self, was_connected: bool) -> None:
@@ -252,18 +260,25 @@ class RcpClient:
                 if future:
                     # Give it up to 5 seconds to respond
                     return await asyncio.wait_for(future, timeout=5.0)
-            except (TimeoutError, OSError, asyncio.CancelledError) as err:
+            except asyncio.CancelledError:
+                # Never swallow cancellation: cancel the future in place so a
+                # late device response is consumed by it (and not mis-paired
+                # with the next caller's future at deq[0]), then re-raise.
+                if future and not future.done():
+                    future.cancel()
+                raise
+            except (TimeoutError, OSError) as err:
                 _LOGGER.debug("Failed to send command '%s': %s", command, err)
-                if future and command_name in self._pending_responses:
-                    with contextlib.suppress(ValueError):
-                        self._pending_responses[command_name].remove(future)
+                # Leave the cancelled future in the deque; _resolve_future
+                # pops done futures without setting a result, so a late
+                # response is consumed by this slot instead of mis-pairing
+                # with the next in-flight call of the same command.
+                if future and not future.done():
+                    future.cancel()
 
                 # Only disconnect if it's a hard error or explicitly requested
                 if disconnect_on_error or isinstance(err, OSError):
                     self._handle_disconnect()
-
-                if isinstance(err, asyncio.CancelledError) and self._closing:
-                    raise
                 return None
             else:
                 return "SENT"

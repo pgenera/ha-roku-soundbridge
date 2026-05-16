@@ -266,6 +266,18 @@ async def async_setup_entry(
         },
         "async_play_preset",
     )
+    platform.async_register_entity_service(
+        "clear_display",
+        {},
+        "async_clear_display",
+    )
+    platform.async_register_entity_service(
+        "sketch_command",
+        {
+            vol.Required("command"): cv.string,
+        },
+        "async_sketch_command",
+    )
 
 
 class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
@@ -619,6 +631,15 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
         """Send a raw sketch command."""
         await self._async_ensure_display_ready()
         await self._client.send_sketch_commands([command])
+
+    async def async_clear_display(self) -> None:
+        """Release the held sketch frame and return the device to its native UI.
+
+        Closes the persistent sketch socket on port 4444; the SoundBridge
+        reverts to whatever the firmware would otherwise be showing (now
+        playing, idle screen, etc.).
+        """
+        await self._client.close_sketch()
 
     async def async_browse_media(
         self,
