@@ -649,25 +649,52 @@ class RcpClient:
         )
 
     async def send_sketch_commands(self, commands: list[str]) -> bool:
-        """Send sketch commands via a persistent port 4444 connection."""
+        """Send sketch commands via a persistent port 4444 connection.
+
+        The socket is opened once and held for the lifetime of this client so
+        that the sketch frame stays on the display indefinitely — the device
+        reverts to its native UI as soon as the sketch sub-shell exits. Call
+        :meth:`close_sketch` (or ``roku_soundbridge.clear_display``) to release.
+        """
         if not self._sketch_writer:
+            reader: asyncio.StreamReader | None = None
+            writer: asyncio.StreamWriter | None = None
             try:
-                self._sketch_reader, self._sketch_writer = await asyncio.wait_for(
+                reader, writer = await asyncio.wait_for(
                     asyncio.open_connection(self.host, 4444), timeout=5.0
                 )
-                self._sketch_writer.write(b"sketch\r\n")
-                await self._sketch_writer.drain()
-                # Wait for sketch prompt
-                buf = b""
-                while b"sketch> " not in buf:
-                    chunk = await asyncio.wait_for(self._sketch_reader.read(1024), timeout=2.0)
-                    if not chunk:
-                        break
-                    buf += chunk
-            except (TimeoutError, OSError, ConnectionRefusedError) as err:
+                # The shell on 4444 emits "...SoundBridge> " then accepts
+                # `sketch` and emits "sketch> ". On a freshly-woken device the
+                # initial banner can take ~2s, so allow a generous total
+                # budget rather than a tight per-read timeout (which leaked
+                # the socket when the banner was slow).
+                async def _await_prompt(needle: bytes, total: float) -> None:
+                    buf = b""
+                    deadline = asyncio.get_event_loop().time() + total
+                    while needle not in buf:
+                        remaining = deadline - asyncio.get_event_loop().time()
+                        if remaining <= 0:
+                            raise TimeoutError(f"never saw {needle!r}")
+                        chunk = await asyncio.wait_for(
+                            reader.read(1024), timeout=remaining
+                        )
+                        if not chunk:
+                            raise ConnectionError("closed before prompt")
+                        buf += chunk
+
+                await _await_prompt(b"SoundBridge> ", total=8.0)
+                writer.write(b"sketch\r\n")
+                await writer.drain()
+                await _await_prompt(b"sketch> ", total=5.0)
+            except (TimeoutError, OSError, ConnectionRefusedError, ConnectionError) as err:
                 _LOGGER.error("Failed to open sketch connection to %s: %s", self.host, err)
-                self._sketch_writer = None
+                if writer is not None:
+                    writer.close()
+                    with contextlib.suppress(Exception):
+                        await writer.wait_closed()
                 return False
+            self._sketch_reader = reader
+            self._sketch_writer = writer
 
         try:
             chunk_size = 10
@@ -719,7 +746,7 @@ class RcpClient:
 
         try:
             return await asyncio.wait_for(self._list_future, timeout=10.0)
-        except TimeoutError, asyncio.CancelledError:
+        except (TimeoutError, asyncio.CancelledError):
             return []
 
     async def list_servers(self) -> list[str]:

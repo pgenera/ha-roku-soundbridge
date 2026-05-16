@@ -19,50 +19,99 @@ The integration is primarily configured via the UI (Config Flow).
 - **Port**: Default is **5555** (recommended).
 
 ## Display Control Services
-The SoundBridge's vacuum fluorescent display (VFD) can be controlled via several services.
+The SoundBridge's vacuum fluorescent display (VFD; 512×32 on the M2000) is driven by a single compositing service plus two helpers.
 
-### `roku_soundbridge.draw_text`
-Draw static text on the display.
+### `roku_soundbridge.draw`
+Renders a list of items in one frame. Item types:
+
+| `type` | Fields | Notes |
+| --- | --- | --- |
+| `text` | `text`, `x`, `y`, `font_index` (1, 2, 3, 10, 12, 14), or `font_path` + `size` + `anchor` | With `font_path` set, the text is rendered via Pillow (any TTF). Without it, the device's native bitmap font is used. |
+| `icon` | `icon` (e.g. `mdi:weather-sunny`), `x`, `y`, `size`, `anchor` (default `lm`) | Resolved against the bundled Material Design Icons font. |
+| `rect` | `x`, `y`, `w`, `h`, `filled` | Filled or outlined rectangle. |
+| `line` | `x1`, `y1`, `x2`, `y2` | Straight line. |
+
+`x` and `y` accept positive integers or the string `"c"` to center on that axis. Pass `clear: false` to overlay on top of whatever is already drawn (default is `clear: true`).
+
+A sketch frame drawn with `draw` stays on the display **indefinitely** — until you call `roku_soundbridge.clear_display`, the device powers off, or the sketch socket is otherwise dropped (the integration holds one persistent socket per device on port 4444, so repeated `draw` calls do not open new connections).
+
+#### Example — weather + outerwear hint for a 5-year-old
+Fetches today's forecast from `weather.google`, picks a Material Design Icon for the condition, and renders the icon plus a short, kid-readable outerwear suggestion on a SoundBridge M2000. The text is sized to fit `font_index: 3` (ZurichBold32, the full 32-pixel display height) alongside a 32-pixel icon on a 512-pixel display.
+
 ```yaml
-action: roku_soundbridge.draw_text
-target:
-  entity_id: media_player.my_soundbridge
-data:
-  text: "Hello Home Assistant"
-  font: 3 # ZurichBold32 (Large)
-  x: c    # Center horizontally
-  y: c    # Center vertically
+alias: SoundBridge — Morning outerwear hint
+description: Show today's weather icon and a kid-friendly outerwear suggestion.
+mode: single
+triggers:
+  - trigger: time
+    at: "07:00:00"
+  - trigger: event
+    event_type: outerwear_hint_now      # for manual testing
+actions:
+  - action: weather.get_forecasts
+    target:
+      entity_id: weather.google
+    data:
+      type: daily
+    response_variable: forecast
+  - variables:
+      today: "{{ forecast['weather.google'].forecast[0] }}"
+      condition: "{{ today.condition }}"
+      high: "{{ today.temperature | float(60) }}"
+      low:  "{{ today.templow     | float(high) }}"
+      icon: >-
+        {% set m = {
+          'sunny':           'weather-sunny',
+          'clear-night':     'weather-night',
+          'partlycloudy':    'weather-partly-cloudy',
+          'cloudy':          'weather-cloudy',
+          'fog':             'weather-fog',
+          'hail':            'weather-hail',
+          'lightning':       'weather-lightning',
+          'lightning-rainy': 'weather-lightning-rainy',
+          'pouring':         'weather-pouring',
+          'rainy':           'weather-rainy',
+          'snowy':           'weather-snowy-heavy',
+          'snowy-rainy':     'weather-snowy-rainy',
+          'windy':           'weather-windy',
+          'windy-variant':   'weather-windy-variant',
+          'exceptional':     'weather-hurricane'
+        } %}
+        mdi:{{ m.get(condition, 'weather-cloudy') }}
+  - action: ai_task.generate_data
+    data:
+      task_name: outerwear_hint
+      instructions: >-
+        Write a single outerwear suggestion for a five-year-old getting
+        dressed for the day. Conditions: {{ condition }}, high {{ high|round }}°F,
+        low {{ low|round }}°F. Hard rules:
+        - 22 characters or fewer.
+        - No emoji, no quotes, no trailing punctuation other than ! or .
+        - Just the suggestion itself — no preamble, no explanation.
+        Examples of the right shape: "Raincoat and boots!", "Big coat + mittens",
+        "Shorts and sun hat!", "Light jacket today".
+    response_variable: gemini
+  - variables:
+      message: "{{ (gemini.data | default('Dress for the weather!')) | trim | truncate(22, true, '') }}"
+  - action: roku_soundbridge.draw
+    target:
+      entity_id: media_player.soundbridge
+    data:
+      clear: true
+      items:
+        - type: icon
+          icon: "{{ icon }}"
+          x: 0
+          y: c            # vertically centered (anchor lm)
+          size: 32
+        - type: text
+          text: "{{ message | trim }}"
+          x: 44           # leave room for the 32px icon + 12px gutter
+          y: c
+          font_index: 3   # ZurichBold32 — fills the full 32px height
 ```
 
-### `roku_soundbridge.draw_marquee`
-Draw a scrolling text marquee.
-```yaml
-action: roku_soundbridge.draw_marquee
-target:
-  entity_id: media_player.my_soundbridge
-data:
-  text: "Breaking News: High temperature alert in the Living Room!"
-  speed: 15
-  font: 10 # ZurichBold16
-```
-
-### `roku_soundbridge.draw_image`
-Draw a local image file or a remote URL on the display. The image will be converted to 1-bit black & white and resized to fit.
-```yaml
-# Local file
-action: roku_soundbridge.draw_image
-target:
-  entity_id: media_player.my_soundbridge
-data:
-  image_path: "/config/www/icons/weather_sunny.png"
-
-# Remote URL
-action: roku_soundbridge.draw_image
-target:
-  entity_id: media_player.my_soundbridge
-data:
-  image_path: "https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_92x30dp.png"
-```
+To dry-run from the UI: Developer Tools → Events → fire `outerwear_hint_now`.
 
 ### `roku_soundbridge.clear_display`
 Instantly clears any custom graphics and returns to the default system display (or blank if nothing is playing).

@@ -116,50 +116,56 @@ def render_icon_to_commands(
 
 
 async def async_send_sketch_commands(host: str, port: int, commands: list[str]) -> bool:
-    """Send a list of commands to the SoundBridge sketch sub-shell on port 4444."""
+    """Send a list of commands to the SoundBridge sketch sub-shell on port 4444.
+
+    One-shot helper for tests/utilities. Closes the socket on return, which
+    causes the device to revert to its native UI — production code should
+    use :meth:`protocol.RcpClient.send_sketch_commands` instead, which holds
+    a persistent socket so the sketch frame stays on the display.
+    """
+    reader = writer = None
     try:
         reader, writer = await asyncio.wait_for(
             asyncio.open_connection(host, port), timeout=5
         )
 
-        # Wait for SoundBridge> prompt
-        # We use a loop to consume the banner
-        buf = b""
-        while b"SoundBridge> " not in buf:
-            chunk = await asyncio.wait_for(reader.read(1024), timeout=2)
-            if not chunk:
-                break
-            buf += chunk
+        async def _await_prompt(needle: bytes, total: float) -> None:
+            buf = b""
+            deadline = asyncio.get_event_loop().time() + total
+            while needle not in buf:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    raise TimeoutError(f"never saw {needle!r}")
+                chunk = await asyncio.wait_for(reader.read(1024), timeout=remaining)
+                if not chunk:
+                    raise ConnectionError("closed before prompt")
+                buf += chunk
 
+        # The initial banner can take ~2s after a wake; use a generous total.
+        await _await_prompt(b"SoundBridge> ", total=8.0)
         _LOGGER.debug("Entering sketch mode on %s:%d", host, port)
         writer.write(b"sketch\r\n")
         await writer.drain()
+        await _await_prompt(b"sketch> ", total=5.0)
 
-        # Wait for sketch> prompt
-        buf = b""
-        while b"sketch> " not in buf:
-            chunk = await asyncio.wait_for(reader.read(1024), timeout=2)
-            if not chunk:
-                break
-            buf += chunk
-
-        # Send commands in batches to avoid buffer overflow
-        chunk_size = 20
+        chunk_size = 10
         for i in range(0, len(commands), chunk_size):
             batch = "\r\n".join(commands[i : i + chunk_size]) + "\r\n"
             writer.write(batch.encode())
             await writer.drain()
-            # Minimal sleep to let the device parse
-            await asyncio.sleep(0.02)
-
-        # Finish without quitting so the sketch remains on the display
-        writer.close()
-        await writer.wait_closed()
-    except (TimeoutError, ConnectionRefusedError, OSError) as err:
+            await asyncio.sleep(0.05)
+    except (TimeoutError, ConnectionRefusedError, OSError, ConnectionError) as err:
         _LOGGER.error("Failed to send sketch commands to %s:%d: %s", host, port, err)
         return False
     else:
         return True
+    finally:
+        if writer is not None:
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def parse_display_bitmap(data: bytes, width: int = 512, height: int = 32) -> list[str]:
