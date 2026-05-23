@@ -8,13 +8,25 @@ from typing import Any
 
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.const import CONF_HOST, CONF_PORT
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import selector
 
 from . import protocol
-from .const import DEFAULT_PORT, DOMAIN
+from .const import (
+    CONF_MIRROR_IDLE_SECONDS,
+    CONF_MIRROR_SOURCE,
+    DEFAULT_MIRROR_IDLE_SECONDS,
+    DEFAULT_PORT,
+    DOMAIN,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -48,6 +60,12 @@ class RokuSoundBridgeConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
+        """Return the options flow handler."""
+        return RokuSoundBridgeOptionsFlow()
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -80,3 +98,33 @@ class RokuSoundBridgeConfigFlow(ConfigFlow, domain=DOMAIN):
 
 class CannotConnect(HomeAssistantError):
     """Error to indicate we cannot connect."""
+
+
+class RokuSoundBridgeOptionsFlow(OptionsFlow):
+    """Options flow for the mirror-display feature."""
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show or save the mirror-display options."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        current = self.config_entry.options
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_MIRROR_SOURCE,
+                    default=current.get(CONF_MIRROR_SOURCE, ""),
+                ): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="media_player")
+                ),
+                vol.Optional(
+                    CONF_MIRROR_IDLE_SECONDS,
+                    default=current.get(
+                        CONF_MIRROR_IDLE_SECONDS, DEFAULT_MIRROR_IDLE_SECONDS
+                    ),
+                ): vol.All(int, vol.Range(min=5, max=3600)),
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=schema)

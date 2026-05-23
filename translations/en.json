@@ -21,6 +21,29 @@
             }
         }
     },
+    "options": {
+        "step": {
+            "init": {
+                "title": "Mirror display options",
+                "description": "Use the SoundBridge VFD as a now-playing display for another media player. Toggle the 'Mirror display' switch on this device to enable.",
+                "data": {
+                    "mirror_source_entity_id": "Source media player",
+                    "mirror_idle_standby_seconds": "Idle standby delay (seconds)"
+                },
+                "data_description": {
+                    "mirror_source_entity_id": "When this player is playing, its title and artist are shown on the SoundBridge display.",
+                    "mirror_idle_standby_seconds": "How long to wait after the source pauses or idles before sending the SoundBridge to standby."
+                }
+            }
+        }
+    },
+    "entity": {
+        "switch": {
+            "mirror_display": {
+                "name": "Mirror display"
+            }
+        }
+    },
     "services": {
         "draw": {
             "name": "Draw composited layout",

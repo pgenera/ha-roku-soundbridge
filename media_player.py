@@ -197,14 +197,15 @@ async def async_setup_entry(
     async_add_entities: AddEntitiesCallback,
 ) -> None:
     """Set up the Roku SoundBridge media player platform."""
-    client = entry.runtime_data
-    async_add_entities(
-        [
-            RokuSoundBridgeMediaPlayer(
-                client, entry.title, entry.entry_id, entry.unique_id
-            )
-        ]
+    runtime = entry.runtime_data
+    player = RokuSoundBridgeMediaPlayer(
+        runtime.client,
+        entry.title,
+        entry.entry_id,
+        entry.unique_id,
+        runtime,
     )
+    async_add_entities([player])
 
     platform = entity_platform.async_get_current_platform()
     platform.async_register_entity_service(
@@ -293,9 +294,11 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
         name: str,
         entry_id: str,
         unique_id: str | None,
+        runtime: Any = None,
     ) -> None:
         """Initialize the Roku SoundBridge media player."""
         self._client = client
+        self._runtime = runtime
         self._attr_unique_id = unique_id
         self._attr_device_info = {
             "identifiers": {(DOMAIN, unique_id or f"{client.host}:{client.port}")},
@@ -305,8 +308,10 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
         }
 
     async def async_added_to_hass(self) -> None:
-        """Register callback."""
+        """Register callback and surface our entity_id to the runtime data."""
         self._client.update_callback = self._update_state
+        if self._runtime is not None:
+            self._runtime.own_entity_id = self.entity_id
 
     @callback
     def _update_state(self) -> None:
@@ -328,6 +333,14 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
             return MediaPlayerState.OFF
 
         state = self._client.state
+        # When the SB is awake purely because we're driving the display from
+        # another source, hide that from HA — report OFF.
+        if (
+            self._runtime is not None
+            and self._runtime.mirror.mirror_active
+            and state in ("stop", "buffering")
+        ):
+            return MediaPlayerState.OFF
         if state == "play":
             return MediaPlayerState.PLAYING
         if state == "pause":
@@ -415,9 +428,12 @@ class RokuSoundBridgeMediaPlayer(MediaPlayerEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return extra state attributes."""
+        mirror = self._runtime.mirror if self._runtime is not None else None
         return {
             "display_line1": self._client.display_lines[0],
             "display_line2": self._client.display_lines[1],
+            "mirror_active": bool(mirror.mirror_active) if mirror else False,
+            "mirror_source": mirror.source_entity_id if mirror else None,
             "mac_address": self._client.mac_address,
             "version": self._client.version,
             **self._client.metadata,
