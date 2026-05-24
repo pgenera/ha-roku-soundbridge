@@ -618,11 +618,14 @@ class RcpClient:
     async def turn_on(self) -> None:
         """Wake the SoundBridge from standby (without auto-resuming playback).
 
-        Uses ``SetPowerState on`` — the symmetric counterpart of the
-        standby command. Does NOT start playback; callers that want to
-        resume the last preset should issue ``PlayPreset 0`` separately.
+        Uses ``IrDispatchCommand CK_POWER_ON`` — the documented IR
+        button-press that brings the unit out of standby mode. The
+        SetPowerState command is not honored for wake on M2000 firmware.
+        Callers that want "wake and play" can follow this with PlayPreset.
         """
-        await self._send_command("SetPowerState on", wait_for_response=False)
+        await self._send_command(
+            "IrDispatchCommand CK_POWER_ON", wait_for_response=False
+        )
         self.power_state = "on"
         self.update_callback()
 
