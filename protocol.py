@@ -616,23 +616,11 @@ class RcpClient:
         self.update_callback()
 
     async def turn_on(self) -> None:
-        """Turn on the SoundBridge and resume the last preset.
+        """Wake the SoundBridge from standby (without auto-resuming playback).
 
-        This is the media_player.turn_on behavior: wake AND start playing.
-        For wake-without-play (e.g. mirror-display mode), use
-        :meth:`wake_silent` instead.
-        """
-        await self._send_command("PlayPreset 0", wait_for_response=False)
-        self.power_state = "on"
-        self.update_callback()
-
-    async def wake_silent(self) -> None:
-        """Wake the SoundBridge without starting playback.
-
-        Uses ``SetPowerState on`` (the symmetric counterpart of the standby
-        command), which transitions the device out of standby but does not
-        trigger preset resumption. Intended for cases where we want to
-        drive the display while the SB itself produces no audio.
+        Uses ``SetPowerState on`` — the symmetric counterpart of the
+        standby command. Does NOT start playback; callers that want to
+        resume the last preset should issue ``PlayPreset 0`` separately.
         """
         await self._send_command("SetPowerState on", wait_for_response=False)
         self.power_state = "on"

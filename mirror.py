@@ -227,8 +227,8 @@ class MirrorDisplayController:
                 if not self._client.is_connected:
                     _LOGGER.debug("Mirror: SB not reachable; skipping wake")
                     return
-                _LOGGER.debug("Mirror: waking SB on play transition (silent)")
-                await self._client.wake_silent()
+                _LOGGER.debug("Mirror: waking SB on play transition")
+                await self._client.turn_on()
                 woke = await self._client.wait_for_power_on()
                 if not woke:
                     _LOGGER.debug("Mirror: SB did not confirm wake; skipping draw")
