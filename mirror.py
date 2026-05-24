@@ -171,6 +171,17 @@ class MirrorDisplayController:
 
     @callback
     def _handle_source_change(self, event: Event[EventStateChangedData]) -> None:
+        old_state = event.data.get("old_state")
+        new_state = event.data.get("new_state")
+        old_title = old_state.attributes.get("media_title") if old_state else None
+        new_title = new_state.attributes.get("media_title") if new_state else None
+        _LOGGER.info(
+            "Mirror: source event old=%s/%r new=%s/%r",
+            old_state.state if old_state else None,
+            old_title,
+            new_state.state if new_state else None,
+            new_title,
+        )
         self._reevaluate()
 
     @callback
@@ -356,11 +367,14 @@ class MirrorDisplayController:
                 commands.append("font 11")  # ZurichLite16
                 commands.append(f'text 0 24 "{_sanitize(artist)}"')
 
+        _LOGGER.info("Mirror: rendering frame title=%r artist=%r", title, artist)
         ok = await self._client.send_sketch_commands(commands)
         if ok:
             self._last_frame = key
             self._last_frame_commands = commands
             self._schedule_heartbeat()
+        else:
+            _LOGGER.info("Mirror: send_sketch_commands returned False")
 
 
 def _sanitize(s: str) -> str:
