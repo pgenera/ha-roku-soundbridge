@@ -48,12 +48,6 @@ _IDLE_STATES = {
     MediaPlayerState.IDLE,
 }
 
-# How often to re-push the active mirror frame so the SoundBridge firmware's
-# native UI repaints don't permanently overwrite us. Short enough to be
-# imperceptible after a stomp (<5s of stale native UI) but long enough to
-# avoid hammering the sketch socket.
-_HEARTBEAT_SECONDS = 4
-
 
 class MirrorDisplayController:
     """Mirror another media_player entity's now-playing onto the SoundBridge VFD."""
@@ -85,20 +79,12 @@ class MirrorDisplayController:
         self._idle_cancel = None
         # Last frame key (title, artist) successfully pushed.
         self._last_frame: tuple[str, str] | None = None
-        # Cached command list for the last frame so the heartbeat can resend it
-        # without re-rasterising the text every time.
-        self._last_frame_commands: list[str] | None = None
         # We only auto-wake on transitions INTO an active state, not on
         # repeat metadata updates while already active.
         self._was_active: bool = False
         # Set whenever we put the device to standby ourselves, so we know it's
         # OK to wake again on the next play; cleared on manual user activity.
         self._mirror_active: bool = False
-        # Periodic re-push handle: the SoundBridge firmware will repaint over
-        # the sketch frame whenever its native UI (now-playing, idle splash,
-        # menu) decides to. Re-sending the same frame on a short interval keeps
-        # our content visible without forcing user-visible flicker.
-        self._heartbeat_cancel = None
 
     # --- Public surface ---
 
@@ -139,12 +125,10 @@ class MirrorDisplayController:
             self._enabled = False
             self._stop_tracking()
             self._cancel_idle_timer()
-            self._cancel_heartbeat()
             # If we engaged mirror mode, leave the device in whatever state
             # it's in now — don't aggressively re-standby on disable.
             self._mirror_active = False
             self._last_frame = None
-            self._last_frame_commands = None
 
     def start(self) -> None:
         """Begin tracking if enabled. Safe to call before HA is fully running."""
@@ -156,7 +140,6 @@ class MirrorDisplayController:
         """Tear down all listeners and timers. Idempotent."""
         self._stop_tracking()
         self._cancel_idle_timer()
-        self._cancel_heartbeat()
         self._mirror_active = False
 
     # --- Internals ---
@@ -244,8 +227,8 @@ class MirrorDisplayController:
                 if not self._client.is_connected:
                     _LOGGER.debug("Mirror: SB not reachable; skipping wake")
                     return
-                _LOGGER.debug("Mirror: waking SB on play transition")
-                await self._client.turn_on()
+                _LOGGER.debug("Mirror: waking SB on play transition (silent)")
+                await self._client.wake_silent()
                 woke = await self._client.wait_for_power_on()
                 if not woke:
                     _LOGGER.debug("Mirror: SB did not confirm wake; skipping draw")
@@ -270,8 +253,6 @@ class MirrorDisplayController:
         """Send the device to standby; clear local mirror state."""
         self._mirror_active = False
         self._last_frame = None
-        self._last_frame_commands = None
-        self._cancel_heartbeat()
         try:
             if not self._client.is_connected:
                 return
@@ -297,42 +278,6 @@ class MirrorDisplayController:
     def _on_idle_timeout(self, _now) -> None:
         self._idle_cancel = None
         self._hass.async_create_task(self._standby_now())
-
-    def _schedule_heartbeat(self) -> None:
-        """Arm the periodic re-push so the firmware can't permanently steal the frame."""
-        self._cancel_heartbeat()
-        self._heartbeat_cancel = async_call_later(
-            self._hass, _HEARTBEAT_SECONDS, self._on_heartbeat
-        )
-
-    def _cancel_heartbeat(self) -> None:
-        if self._heartbeat_cancel is not None:
-            self._heartbeat_cancel()
-            self._heartbeat_cancel = None
-
-    @callback
-    def _on_heartbeat(self, _now) -> None:
-        self._heartbeat_cancel = None
-        self._hass.async_create_task(self._do_heartbeat())
-
-    async def _do_heartbeat(self) -> None:
-        """Re-send the last frame if we're still in mirror-only mode."""
-        try:
-            if not self._mirror_active or self._last_frame_commands is None:
-                return
-            if not self._client.is_connected:
-                # Device gone — stop trying until something else wakes us back.
-                return
-            if self._client.power_state == "standby":
-                return
-            await self._client.send_sketch_commands(self._last_frame_commands)
-        except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Mirror: heartbeat error: %s", err)
-        finally:
-            # Re-arm if still active. _mirror_active flips to False in the
-            # standby path, which is the natural stop signal.
-            if self._mirror_active and self._last_frame_commands is not None:
-                self._schedule_heartbeat()
 
     async def _render(self, title: str, artist: str) -> None:
         """Push a two-line frame to the display, skipping redundant redraws."""
@@ -375,5 +320,3 @@ class MirrorDisplayController:
         ok = await self._client.send_sketch_commands(commands)
         if ok:
             self._last_frame = key
-            self._last_frame_commands = commands
-            self._schedule_heartbeat()
