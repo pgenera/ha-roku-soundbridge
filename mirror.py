@@ -26,8 +26,6 @@ from homeassistant.helpers.event import (
     async_track_state_change_event,
 )
 
-from .display import render_text_to_commands
-
 if TYPE_CHECKING:
     from .protocol import RcpClient
 
@@ -280,43 +278,43 @@ class MirrorDisplayController:
         self._hass.async_create_task(self._standby_now())
 
     async def _render(self, title: str, artist: str) -> None:
-        """Push a two-line frame to the display, skipping redundant redraws."""
+        """Push a two-line frame to the display, skipping redundant redraws.
+
+        Uses the device's native sketch fonts via "font N" + "text X Y ...":
+        - 16px-tall displays (M1000): one line, ZurichBold16 (font 10).
+        - 32px-tall displays (M2000/R1000): title in ZurichBold16, artist
+          in ZurichLite16 (font 11), stacked.
+        Native fonts cut bytes-on-the-wire by 100-1000x vs Pillow rasters.
+        """
         key = (title, artist)
         if key == self._last_frame:
             return
         if not self._client.is_connected:
             return
-        width = self._client.display_width
+
         height = self._client.display_height
-        # Two horizontal halves: title on top, artist on bottom.
-        # Use a font size that fits one line vertically; render_text_to_commands
-        # falls back to the bundled Roboto font when no path is given.
-        line_height = max(8, height // 2)
+
         commands = ["clear"]
-        if title:
-            commands.extend(
-                render_text_to_commands(
-                    title,
-                    size=line_height,
-                    x=0,
-                    y=0,
-                    anchor="lt",
-                    width=width,
-                    height=height,
-                )
-            )
-        if artist:
-            commands.extend(
-                render_text_to_commands(
-                    artist,
-                    size=line_height,
-                    x=0,
-                    y=line_height,
-                    anchor="lt",
-                    width=width,
-                    height=height,
-                )
-            )
+        if height < 32:
+            # Single-line display: title only (artist would be unreadable).
+            line = title or artist
+            if line:
+                commands.append("font 10")  # ZurichBold16
+                commands.append(f'text 0 {height // 2} "{_sanitize(line)}"')
+        else:
+            # Two lines, vertically centered within each half.
+            if title:
+                commands.append("font 10")  # ZurichBold16
+                commands.append(f'text 0 8 "{_sanitize(title)}"')
+            if artist:
+                commands.append("font 11")  # ZurichLite16
+                commands.append(f'text 0 24 "{_sanitize(artist)}"')
+
         ok = await self._client.send_sketch_commands(commands)
         if ok:
             self._last_frame = key
+
+
+def _sanitize(s: str) -> str:
+    """Escape quotes and strip line endings for inclusion in a sketch text command."""
+    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\r", " ").replace("\n", " ")
